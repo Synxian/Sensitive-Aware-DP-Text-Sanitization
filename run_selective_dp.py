@@ -16,6 +16,7 @@ from spacy.lang.en import English
 from transformers import BertTokenizer, BertForMaskedLM
 from nandptextsan import NADPTextSan_init, NADPTextSan, NADPTextSan_plus
 import json
+import pandas as pd
 
 
 def set_seed(args):
@@ -42,7 +43,7 @@ def main():
 
     # Required parameters
     parser.add_argument(
-        "--data_dir", default="./data/SST-2/", type=str, help="The input dir"
+        "--data_dir", default="./datasets/i2b2/", type=str, help="The input dir"
     )
 
     parser.add_argument(
@@ -54,7 +55,7 @@ def main():
 
     parser.add_argument(
         "--output_dir",
-        default="./output_SanText/QNLI/",
+        default="./output_SanText/i2b2/",
         type=str,
         help="The output directory where the model predictions and checkpoints will be written.",
     )
@@ -89,8 +90,8 @@ def main():
 
     parser.add_argument(
         "--task",
-        choices=["CliniSTS", "SST-2", "QNLI"],
-        default="SST-2",
+        choices=["i2b2", "SST-2", "QNLI"],
+        default="i2b2",
         help="NLP eval tasks",
     )
 
@@ -99,10 +100,10 @@ def main():
     )
 
     parser.add_argument(
-        "--epsilon", type=float, default=15, help="privacy parameter epsilon"
+        "--epsilon", type=float, default=8, help="privacy parameter epsilon"
     )
     parser.add_argument(
-        "--s_epsilon", type=float, default=0.5, help="privacy parameter epsilon"
+        "--s_epsilon", type=float, default=4, help="privacy parameter epsilon"
     )
     parser.add_argument(
         "--p",
@@ -111,7 +112,7 @@ def main():
         help="SanText+: probability of non-sensitive words to be sanitized",
     )
 
-    parser.add_argument("--threads", type=int, default=8, help="number of processors")
+    parser.add_argument("--threads", type=int, default=1, help="number of processors")
 
     args = parser.parse_args()
 
@@ -150,7 +151,7 @@ def main():
 
     words = [key for key, _ in vocab.most_common()]
     with open(
-        "selective_output/sensitive_mapping/0.3_sst2.json", "r", encoding="utf8"
+        "./selective_output/sensitive_mapping/0.6_i2b2.json", "r", encoding="utf8"
     ) as f:
         sensitive_words = json.load(f)
     sensitive_words = list(sensitive_words.keys())
@@ -202,12 +203,17 @@ def main():
         )
         if len(normal_word_embed) > len(sensitive_word_embed):
             rest = (
-                (len(normal_word_embed) - len(sensitive_word_embed))
+                (len(sensitive_word_embed))
                 * (args.epsilon - args.s_epsilon)
                 / len(normal_word_embed)
             )
             args.epsilon = args.epsilon + rest
-            print(f"Adjusted epsilon: {args.epsilon}")
+            print(
+                f"epsilon: {args.epsilon}, s_epsilon: {args.s_epsilon}, Adjusted epsilon: {args.epsilon}"
+            )
+            print(
+                f"normal_word_embed: {len(normal_word_embed)}, sensitive_word_embed: {len(sensitive_word_embed)}"
+            )
         n_prob_matrix = cal_probability(
             normal_word_embed, all_word_embed, "normal", args.epsilon, args.s_epsilon
         )
@@ -233,60 +239,62 @@ def main():
 
     threads = min(args.threads, cpu_count())
     total_epsilon = 0
-    for file_name in ["train.tsv", "dev.tsv"]:
+    for file_name in ["train.csv"]:
         data_file = os.path.join(args.data_dir, file_name)
         out_file = open(os.path.join(args.output_dir, file_name), "w", encoding="utf-8")
         logger.info(
             "Processing file: %s. Will write to: %s"
             % (data_file, os.path.join(args.output_dir, file_name))
         )
+        if args.task in ["SST-2", "QNLI"]:
+            num_lines = sum(1 for _ in open(data_file))
+            with open(data_file, "r", encoding="utf-8") as rf:
+                # header
+                header = next(rf)
+                out_file.write(header)
+                labels = []
+                docs = []
+                if args.task == "SST-2":
+                    for line in tqdm(rf, total=num_lines - 1):
+                        content = line.strip().split("\t")
+                        text = content[0]
+                        label = int(content[1])
+                        if args.embedding_type == "glove":
+                            doc = [token.text for token in tokenizer(text)]
+                        else:
+                            doc = tokenizer.tokenize(text)
+                        docs.append(doc)
+                        labels.append(label)
+                elif args.task == "QNLI":
+                    for line in tqdm(rf, total=num_lines - 1):
+                        content = line.strip().split("\t")
+                        text1 = content[1]
+                        text2 = content[2]
+                        label = content[-1]
+                        if args.embedding_type == "glove":
+                            doc1 = [token.text for token in tokenizer(text1)]
+                            doc2 = [token.text for token in tokenizer(text2)]
+                        else:
+                            doc1 = tokenizer.tokenize(text1)
+                            doc2 = tokenizer.tokenize(text2)
 
-        num_lines = sum(1 for _ in open(data_file))
-        with open(data_file, "r", encoding="utf-8") as rf:
-            # header
-            header = next(rf)
-            out_file.write(header)
-            labels = []
+                        docs.append(doc1)
+                        docs.append(doc2)
+                        labels.append(label)
+
+                rf.close()
+        else:
             docs = []
-            if args.task == "SST-2":
-                for line in tqdm(rf, total=num_lines - 1):
-                    content = line.strip().split("\t")
-                    text = content[0]
-                    label = int(content[1])
-                    if args.embedding_type == "glove":
-                        doc = [token.text for token in tokenizer(text)]
-                    else:
-                        doc = tokenizer.tokenize(text)
-                    docs.append(doc)
-                    labels.append(label)
-            elif args.task == "QNLI":
-                for line in tqdm(rf, total=num_lines - 1):
-                    content = line.strip().split("\t")
-                    text1 = content[1]
-                    text2 = content[2]
-                    label = content[-1]
-                    if args.embedding_type == "glove":
-                        doc1 = [token.text for token in tokenizer(text1)]
-                        doc2 = [token.text for token in tokenizer(text2)]
-                    else:
-                        doc1 = tokenizer.tokenize(text1)
-                        doc2 = tokenizer.tokenize(text2)
+            df = pd.read_csv(data_file)
+            texts = df["text"].dropna()
 
-                    docs.append(doc1)
-                    docs.append(doc2)
-                    labels.append(label)
-            else:
-                # Case for datasets with only one column called "text"
-                for line in tqdm(rf, total=num_lines - 1):
-                    content = line.strip().split("\t")
-                    text = content[0]
-                    if args.embedding_type == "glove":
-                        doc = [token.text for token in tokenizer(text)]
-                    else:
-                        doc = tokenizer.tokenize(text)
-                    docs.append(doc)
+            for text in tqdm(texts, total=len(texts)):
+                if args.embedding_type == "glove":
+                    doc = [token.text for token in tokenizer(text)]
+                else:
+                    doc = tokenizer.tokenize(text)
 
-            rf.close()
+                docs.append(doc)
 
         alg = NADPTextSan if args.method == "normal" else NADPTextSan_plus
         print("using method: ", alg)
