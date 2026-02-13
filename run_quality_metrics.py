@@ -16,7 +16,6 @@ def load_data(folder, limit):
         if filename.endswith('.json'):
             with open(os.path.join(folder, filename), 'r', encoding='utf-8') as f:
                 file_data = json.load(f)
-                file_data['new'] =  re.sub(r'(?<=[A-Za-z])\s(?=[A-Za-z])', '', file_data['new']).replace("   ", " ")
                 data.append(file_data)
         if limit and len(data) >= limit:
             break
@@ -45,7 +44,7 @@ def calculate_metrics(data):
 
 if __name__ == "__main__":
     folder = "replacements/plus/s_epsilon_16.0"
-    limit = 1
+    limit = None
     data = load_data(folder, limit)
 
     calculate_metrics(data)
