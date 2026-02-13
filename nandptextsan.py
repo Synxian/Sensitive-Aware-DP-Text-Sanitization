@@ -10,6 +10,7 @@ from sklearn.metrics.pairwise import (
 )
 from functools import partial
 from multiprocessing import Pool, cpu_count
+import json
 
 
 def cal_probability(word_embed_1, word_embed_2, epsilon_type="normal"):
@@ -64,7 +65,7 @@ def NADPTextSan_init(
 
 
 def NADPTextSan(doc):
-    replacements = {}
+    replacements = {"original": " ".join(doc)}
     new_doc = []
     total_epsilon = 0
     for word in doc:
@@ -78,7 +79,6 @@ def NADPTextSan(doc):
                 )
                 total_epsilon += s_epsilon
                 new_doc.append(id2word[sampling_index[0]])
-                replacements[word] = id2word[sampling_index[0]]
             else:
                 index = nword2id[word]
                 sampling_prob = n_prob_matrix[index]
@@ -87,7 +87,6 @@ def NADPTextSan(doc):
                 )
                 total_epsilon += epsilon
                 new_doc.append(id2word[sampling_index[0]])
-                replacements[word] = id2word[sampling_index[0]]
         else:
             # Out-of-Vocab words
             sampling_prob = (
@@ -99,14 +98,14 @@ def NADPTextSan(doc):
             )
             sampling_index = np.random.choice(len(sampling_prob), 1, p=sampling_prob)
             new_doc.append(vocab[sampling_index[0]])
-            replacements[word] = vocab[sampling_index[0]]
     new_doc = " ".join(new_doc)
-    write_replacements_file(replacements)
+    replacements["new"] = new_doc
+    write_replacements_file(replacements, 'normal', s_epsilon)
     return (new_doc, total_epsilon)
 
 
 def NADPTextSan_plus(doc):
-    replacements = {}
+    replacements = {"original": " ".join(doc)}
     new_doc = []
     total_epsilon = 0
     for word in doc:
@@ -122,7 +121,7 @@ def NADPTextSan_plus(doc):
                     )
                     total_epsilon += s_epsilon
                     new_doc.append(id2sword[sampling_index[0]])
-                    replacements[word] = id2sword[sampling_index[0]]
+
                 else:
                     sampling_prob = n_prob_matrix[index]
                     sampling_index = np.random.choice(
@@ -130,7 +129,7 @@ def NADPTextSan_plus(doc):
                     )
                     total_epsilon += epsilon
                     new_doc.append(id2nword[sampling_index[0]])
-                    replacements[word] = id2nword[sampling_index[0]]
+
             else:
                 index = nword2id[word]
                 if flip_p <= p:
@@ -140,7 +139,7 @@ def NADPTextSan_plus(doc):
                     )
                     total_epsilon += epsilon
                     new_doc.append(id2nword[sampling_index[0]])
-                    replacements[word] = id2nword[sampling_index[0]]
+
                 else:
                     sampling_prob = s_prob_matrix[index]
                     sampling_index = np.random.choice(
@@ -148,7 +147,7 @@ def NADPTextSan_plus(doc):
                     )
                     total_epsilon += s_epsilon
                     new_doc.append(id2sword[sampling_index[0]])
-                    replacements[word] = id2sword[sampling_index[0]]
+
         else:
             # Out-of-Vocab words
             sampling_prob = (
@@ -160,22 +159,21 @@ def NADPTextSan_plus(doc):
             )
             sampling_index = np.random.choice(len(sampling_prob), 1, p=sampling_prob)
             new_doc.append(vocab[sampling_index[0]])
-            replacements[word] = vocab[sampling_index[0]]
     new_doc = " ".join(new_doc)
-    write_replacements_file(replacements)
+    replacements["new"] = new_doc
+    write_replacements_file(replacements, 'plus', s_epsilon)
     return (new_doc, total_epsilon)
 
 
-def write_replacements_file(replacements):
-    folder_name = "replacements"
+def write_replacements_file(replacements, mode, epsilon):
+    folder_name = f"replacements/{mode}/s_epsilon_{epsilon}"
     os.makedirs(folder_name, exist_ok=True)
     current_files = os.listdir(folder_name)
     if not current_files:
         file_index = 0
     else:
         file_index = max([int(file.split(".")[0]) for file in current_files]) + 1
-    file_name = f"{file_index}.txt"
+    file_name = f"{file_index}.json"
     file_path = os.path.join(folder_name, file_name)
-    with open(file_path, "w") as f:
-        for word, replacement in replacements.items():
-            f.write(f"{word}\t{replacement}\n")
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(replacements, f, ensure_ascii=False, indent=4)

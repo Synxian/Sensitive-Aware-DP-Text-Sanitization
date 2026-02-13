@@ -4,13 +4,14 @@ import random
 import numpy as np
 import logging
 import os
+import re
 
 logger = logging.getLogger(__name__)
 from tqdm import tqdm
 from scipy.special import softmax
 from functools import partial
 from multiprocessing import Pool, cpu_count
-from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances
 from utils_custext import get_vocab_SST2, get_vocab_QNLI, get_vocab_text, word_normalize
 from spacy.lang.en import English
 from transformers import BertTokenizer, BertForMaskedLM
@@ -28,13 +29,10 @@ def set_seed(args):
 def cal_probability(
     word_embed_1, word_embed_2, epsilon_type="normal", epsilon=None, s_epsilon=None
 ):
-    if epsilon_type == "normal":
-        epsilon = epsilon
-    else:
-        epsilon = s_epsilon
-    distance = cosine_similarity(word_embed_1, word_embed_2)
+    eps = epsilon if epsilon_type == "normal" else s_epsilon
+    distance = euclidean_distances(word_embed_1, word_embed_2)
     sim_matrix = -distance
-    prob_matrix = softmax(epsilon * sim_matrix / 2, axis=1)
+    prob_matrix = softmax(eps * sim_matrix / 2, axis=1)
     return prob_matrix
 
 
@@ -55,7 +53,7 @@ def main():
 
     parser.add_argument(
         "--output_dir",
-        default="./output_SanText/i2b2/",
+        default="./output_euclidean/i2b2/",
         type=str,
         help="The output directory where the model predictions and checkpoints will be written.",
     )
@@ -100,10 +98,10 @@ def main():
     )
 
     parser.add_argument(
-        "--epsilon", type=float, default=8, help="privacy parameter epsilon"
+        "--epsilon", type=float, default=16, help="privacy parameter epsilon"
     )
     parser.add_argument(
-        "--s_epsilon", type=float, default=4, help="privacy parameter epsilon"
+        "--s_epsilon", type=float, default=8, help="privacy parameter epsilon"
     )
     parser.add_argument(
         "--p",
@@ -112,7 +110,7 @@ def main():
         help="SanText+: probability of non-sensitive words to be sanitized",
     )
 
-    parser.add_argument("--threads", type=int, default=1, help="number of processors")
+    parser.add_argument("--threads", type=int, default=2, help="number of processors")
 
     args = parser.parse_args()
 
@@ -289,6 +287,8 @@ def main():
             texts = df["text"].dropna()
 
             for text in tqdm(texts, total=len(texts)):
+                text = text.strip().replace("\n", "").replace("\t", "")
+                text = re.sub(" +", " ", text)
                 if args.embedding_type == "glove":
                     doc = [token.text for token in tokenizer(text)]
                 else:
