@@ -160,7 +160,7 @@ def NADPTextSan_plus(doc):
             sampling_index = np.random.choice(len(sampling_prob), 1, p=sampling_prob)
             new_doc.append(vocab[sampling_index[0]])
     new_doc = " ".join(new_doc)
-    replacements["new"] = " ".join(new_doc)
+    replacements["new"] = new_doc
     write_replacements_file(replacements, 'plus', s_epsilon)
     return (new_doc, total_epsilon)
 
