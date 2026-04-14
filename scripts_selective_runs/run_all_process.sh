@@ -1,0 +1,1 @@
+sh scripts_selective_runs/run_all_process_i2b2.sh && sh scripts_selective_runs/run_all_process_meddocan.sh
