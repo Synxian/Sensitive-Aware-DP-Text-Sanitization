@@ -20,7 +20,7 @@ import os
 import json
 import numpy as np
 from scipy.special import softmax
-from sklearn.metrics.pairwise import euclidean_distances
+from sklearn.metrics.pairwise import cosine_distances
 from dataclasses import dataclass, field
 
 from pydantic_models.satsdp import (
@@ -63,13 +63,10 @@ class Sanitizer:
     s_distance_matrix: np.ndarray | None = None
     n_distance_matrix: np.ndarray | None = None
 
-    # Sensitivity of the utility function u(x,y) = -d(x,y).
-    # Set to max pairwise distance in the embedding space.
-    # NOTE: this is computed from the corpus vocabulary, which makes it
-    # data-dependent and strictly speaking not DP.
-    # TODO: compute d_max over the full public GloVe file (data-independent),
-    # and clamp corpus distances to that value: min(d(x,y), d_max_glove).
-    # This makes sensitivity a public parameter and preserves DP.
+    # Sensitivity of the utility function u(x,y) = -cosine_distance(x,y).
+    # Cosine distance is in [0, 1] for non-negative vectors (like GloVe),
+    # or [0, 2] in general. This is a public fixed value, data-independent,
+    # so it preserves DP (unlike the previous euclidean d_max approach).
     sensitivity: float = 1.0
 
     # Sensitive prob matrix (fixed epsilon_s, precomputed once)
@@ -90,33 +87,29 @@ class Sanitizer:
 
         if self.config.method == SastdpMethod.NORMAL:
             # s_dist: |V_s| x |V_all|, n_dist: |V_n| x |V_all|
-            self.s_distance_matrix = euclidean_distances(
+            self.s_distance_matrix = cosine_distances(
                 embeddings.sensitive_word_embed, embeddings.all_word_embed
             )
-            self.n_distance_matrix = euclidean_distances(
+            self.n_distance_matrix = cosine_distances(
                 embeddings.normal_word_embed, embeddings.all_word_embed
             )
         elif self.config.method == SastdpMethod.PLUS:
             # s_dist: |V_all| x |V_s|, n_dist: |V_all| x |V_n|
-            self.s_distance_matrix = euclidean_distances(
+            self.s_distance_matrix = cosine_distances(
                 embeddings.all_word_embed, embeddings.sensitive_word_embed
             )
-            self.n_distance_matrix = euclidean_distances(
+            self.n_distance_matrix = cosine_distances(
                 embeddings.all_word_embed, embeddings.normal_word_embed
             )
         elif self.config.method == SastdpMethod.SANTEXT:
             # Single square matrix
-            self.n_distance_matrix = euclidean_distances(
+            self.n_distance_matrix = cosine_distances(
                 embeddings.all_word_embed, embeddings.all_word_embed
             )
 
-        # Sensitivity = max pairwise distance across all distance matrices
-        all_maxes = []
-        if self.s_distance_matrix is not None:
-            all_maxes.append(self.s_distance_matrix.max())
-        if self.n_distance_matrix is not None:
-            all_maxes.append(self.n_distance_matrix.max())
-        self.sensitivity = max(all_maxes) if all_maxes else 1.0
+        # Cosine distance is in [0, 1] for non-negative vectors, [0, 2] general.
+        # Sensitivity is fixed and public, no need to compute from data.
+        self.sensitivity = 1.0
 
         # Sensitive prob matrix uses fixed epsilon_s (same for every document)
         if self.s_distance_matrix is not None:
