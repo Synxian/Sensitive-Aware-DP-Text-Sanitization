@@ -166,7 +166,38 @@ def _get_word_embeddings_and_mappings(args: SastdpExecutionArgs, vocab, sensitiv
 
 
 def _get_probability_matrix(args: SastdpExecutionArgs, embedding_and_mappings: SastdpEmbeddingAndMappings):
+    """Build the exponential mechanism probability matrices for the chosen method.
+
+    Each method produces two matrices (s_prob_matrix, n_prob_matrix) whose
+    shapes depend on the sanitization strategy:
+
+    method=normal (NADPTextSan / "Ours"):
+        - s_prob_matrix: |V_s| x |V_all|  — sensitive words sample replacements from the full vocab
+        - n_prob_matrix: |V_n| x |V_all|  — normal words sample replacements from the full vocab
+        Sensitive words use epsilon_s; normal words use adjusted_epsilon (= epsilon_n).
+
+    method=plus (NADPTextSan_plus / "Ours+"):
+        - s_prob_matrix: |V_all| x |V_s|  — any word can cross INTO the sensitive vocab
+        - n_prob_matrix: |V_all| x |V_n|  — any word can cross INTO the normal vocab
+        Rows are indexed by word2id (all words) because the coin flip in
+        NADPTextSan_plus can send any word to either class.
+
+    method=santext (SanText / baseline):
+        - s_prob_matrix: None
+        - n_prob_matrix: |V_all| x |V_all| — all words use the same epsilon, no sensitive/normal split
+
+    NOTE on epsilon redistribution:
+        The `rest` variable computes the per-normal-word share of unused
+        sensitive budget: rest = |V_s| * (epsilon - s_epsilon) / |V_n|.
+        The idea is that sensitive words spend less (s_epsilon < epsilon),
+        so the leftover could be redistributed to normal words to improve
+        utility. However, this is NOT currently applied: adjusted_epsilon
+        is set to args.epsilon (unchanged), making `rest` dead code.
+        See the discussion about per-document redistribution:
+            epsilon_n[i] = (epsilon_t[i] - ns * epsilon_s) / nn
+    """
     if args.method == SastdpMethod.NORMAL:
+        # Sensitive matrix: each sensitive word (row) -> distribution over all words (cols)
         s_prob_matrix = cal_probability(
             embedding_and_mappings.sensitive_word_embed,
             embedding_and_mappings.all_word_embed,
@@ -175,16 +206,20 @@ def _get_probability_matrix(args: SastdpExecutionArgs, embedding_and_mappings: S
             args.s_epsilon,
         )
         if len(embedding_and_mappings.normal_word_embed) > len(embedding_and_mappings.sensitive_word_embed):
+            # Budget saved by using s_epsilon < epsilon on sensitive words,
+            # averaged over normal words. Currently unused (dead code).
             rest = (
                 (len(embedding_and_mappings.sensitive_word_embed))
                 * (args.epsilon - args.s_epsilon)
                 / len(embedding_and_mappings.normal_word_embed)
             )
+            # TODO: should be args.epsilon + rest to redistribute the saved budget
             args.adjusted_epsilon = args.epsilon
             print(f"epsilon: {args.epsilon}, s_epsilon: {args.s_epsilon}, Adjusted epsilon: {args.adjusted_epsilon}")
             print(
                 f"normal_word_embed: {len(embedding_and_mappings.normal_word_embed)}, sensitive_word_embed: {len(embedding_and_mappings.sensitive_word_embed)}"
             )
+        # Normal matrix: each normal word (row) -> distribution over all words (cols)
         n_prob_matrix = cal_probability(
             embedding_and_mappings.normal_word_embed,
             embedding_and_mappings.all_word_embed,
@@ -193,6 +228,8 @@ def _get_probability_matrix(args: SastdpExecutionArgs, embedding_and_mappings: S
             args.s_epsilon,
         )
     elif args.method == SastdpMethod.PLUS:
+        # Sensitive matrix: every word (row) -> distribution over sensitive words (cols)
+        # Rows use word2id because the coin flip can send ANY word into the sensitive class
         s_prob_matrix = cal_probability(
             embedding_and_mappings.all_word_embed,
             embedding_and_mappings.sensitive_word_embed,
@@ -201,6 +238,7 @@ def _get_probability_matrix(args: SastdpExecutionArgs, embedding_and_mappings: S
             args.s_epsilon,
         )
         if len(embedding_and_mappings.normal_word_embed) > len(embedding_and_mappings.sensitive_word_embed):
+            # Same dead-code pattern as method=normal
             rest = (
                 (len(embedding_and_mappings.normal_word_embed) - len(embedding_and_mappings.sensitive_word_embed))
                 * (args.epsilon - args.s_epsilon)
@@ -208,6 +246,7 @@ def _get_probability_matrix(args: SastdpExecutionArgs, embedding_and_mappings: S
             )
             args.adjusted_epsilon = args.epsilon
             print(f"Adjusted epsilon: {args.adjusted_epsilon}")
+        # Normal matrix: every word (row) -> distribution over normal words (cols)
         n_prob_matrix = cal_probability(
             embedding_and_mappings.all_word_embed,
             embedding_and_mappings.normal_word_embed,
@@ -216,6 +255,7 @@ def _get_probability_matrix(args: SastdpExecutionArgs, embedding_and_mappings: S
             args.s_epsilon,
         )
     elif args.method == SastdpMethod.SANTEXT:
+        # Baseline: single square matrix, all words treated identically with uniform epsilon
         n_prob_matrix = cal_probability(
             embedding_and_mappings.all_word_embed, embedding_and_mappings.all_word_embed, epsilon=args.epsilon
         )

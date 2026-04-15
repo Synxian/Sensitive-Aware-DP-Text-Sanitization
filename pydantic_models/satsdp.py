@@ -90,3 +90,4 @@ class SastdpDocumentStatistics(BaseModel):
     sensitive_word_count: int
     normal_word_count: int
     total_word_count: int
+    total_epsilon: float = 0.0
