@@ -56,6 +56,7 @@ def _parse_args() -> SastdpExecutionArgs:
     parser.add_argument("--threads", type=int, default=2)
     parser.add_argument("--sensitive_words_file_path", type=str, default="./selective_output/sensitive_mapping/0.6_i2b2.json")
     parser.add_argument("--language", type=str, default="en")
+    parser.add_argument("--redistribute", action=argparse.BooleanOptionalAction, default=True)
     return SastdpExecutionArgs(**parser.parse_args().__dict__)
 
 
@@ -113,9 +114,9 @@ def main():
     sanitizer.precompute(words, embeddings)
 
     # ================================================================
-    # Compute per-document epsilon_n (only for normal/plus)
+    # Compute per-document epsilon_n (only for normal/plus with --redistribute)
     # ================================================================
-    if config.method in (SastdpMethod.NORMAL, SastdpMethod.PLUS):
+    if config.method in (SastdpMethod.NORMAL, SastdpMethod.PLUS) and args.redistribute:
         logger.info("Computing per-document redistributed epsilon_n...")
         per_doc_epsilon = compute_per_doc_epsilon(docs, sanitizer)
 
@@ -126,8 +127,13 @@ def main():
                 min(epsilon_values), max(epsilon_values), np.mean(epsilon_values),
             )
     else:
-        # SanText: no redistribution, epsilon_n unused
+        # SanText or --no-redistribute: each word uses its fixed epsilon
         per_doc_epsilon = {doc.text_id: None for doc in docs}
+        if config.method != SastdpMethod.SANTEXT:
+            logger.info(
+                "No redistribution: normal words use epsilon=%.4f, sensitive words use s_epsilon=%.4f",
+                config.epsilon, config.s_epsilon,
+            )
 
     # ================================================================
     # Sanitize

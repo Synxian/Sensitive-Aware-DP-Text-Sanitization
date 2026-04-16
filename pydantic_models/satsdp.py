@@ -25,6 +25,7 @@ class SastdpExecutionArgs(BaseModel):
     adjusted_epsilon: float | None = None
     sensitive_words_file_path: str | None = None
     language: str
+    redistribute: bool = True
     corpus_statistics: dict[str, float] = {}
 
     @property

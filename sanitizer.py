@@ -16,6 +16,7 @@ Usage:
     stats = sanitizer.sanitize_normal(doc, epsilon_n=3.5)
 """
 
+import math
 import os
 import json
 import numpy as np
@@ -72,6 +73,18 @@ class Sanitizer:
     # Sensitive prob matrix (fixed epsilon_s, precomputed once)
     s_prob_matrix: np.ndarray | None = None
 
+    @property
+    def mixing_overhead(self) -> float:
+        """L = ln(max(p/(1-p), (1-p)/p)) — extra LDP cost per word from mixing (Theorem 2).
+
+        For method != plus, returns 0.  Requires p in (0, 1) exclusive.
+        """
+        if self.config.method != SastdpMethod.PLUS:
+            return 0.0
+        p = self.config.p
+        assert 0.0 < p < 1.0, f"p must be in (0, 1) for method=plus, got p={p}"
+        return math.log(max(p / (1 - p), (1 - p) / p))
+
     def precompute(self, vocab: list[str], embeddings: SastdpEmbeddingAndMappings):
         """Compute distance matrices and fixed sensitive prob matrix.
 
@@ -111,10 +124,18 @@ class Sanitizer:
         # Sensitivity is fixed and public, no need to compute from data.
         self.sensitivity = 1.0
 
-        # Sensitive prob matrix uses fixed epsilon_s (same for every document)
+        # Sensitive prob matrix uses fixed epsilon_s (same for every document).
+        # For Plus, subtract the mixing overhead L so that the total LDP cost
+        # per sensitive word is s_epsilon (= L + mechanism_epsilon).
         if self.s_distance_matrix is not None:
+            L = self.mixing_overhead
+            s_mech_eps = self.config.s_epsilon - L
+            assert s_mech_eps > 0, (
+                f"s_epsilon ({self.config.s_epsilon}) must exceed mixing overhead "
+                f"L={L:.4f} for method=plus with p={self.config.p}"
+            )
             self.s_prob_matrix = self._build_prob_matrix(
-                self.s_distance_matrix, self.config.s_epsilon
+                self.s_distance_matrix, s_mech_eps
             )
 
     def _build_prob_matrix(self, distance_matrix: np.ndarray, eps: float) -> np.ndarray:
@@ -239,11 +260,19 @@ class Sanitizer:
     ) -> SastdpDocumentStatistics:
         """Ours+: mixed sampling with coin flip probability p.
 
+        epsilon_n is the *total* LDP budget per normal word (including mixing
+        overhead L).  The mechanism receives epsilon_n - L.
         If epsilon_n is None, uses config.epsilon (no redistribution).
         """
         assert self.s_prob_matrix is not None, "Call precompute() first"
         eps_n = epsilon_n if epsilon_n is not None else self.config.epsilon
-        n_prob_matrix = self._build_n_prob_matrix(eps_n)
+        L = self.mixing_overhead
+        eps_n_mech = eps_n - L
+        assert eps_n_mech > 0, (
+            f"epsilon_n ({eps_n}) must exceed mixing overhead "
+            f"L={L:.4f} for method=plus with p={self.config.p}"
+        )
+        n_prob_matrix = self._build_n_prob_matrix(eps_n_mech)
         p = self.config.p
 
         new_doc = []
