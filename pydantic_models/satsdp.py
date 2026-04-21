@@ -25,6 +25,7 @@ class SastdpExecutionArgs(BaseModel):
     adjusted_epsilon: float | None = None
     sensitive_words_file_path: str | None = None
     language: str
+    redistribute: bool = True
     corpus_statistics: dict[str, float] = {}
 
     @property
@@ -90,3 +91,4 @@ class SastdpDocumentStatistics(BaseModel):
     sensitive_word_count: int
     normal_word_count: int
     total_word_count: int
+    total_epsilon: float = 0.0
