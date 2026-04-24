@@ -1,0 +1,26 @@
+# Python 3.12+
+# Install: pip install -r requirements.txt
+
+# Core numerics
+numpy>=2.0
+scipy>=1.10
+scikit-learn>=1.2
+
+# Deep learning
+torch>=2.0
+transformers>=4.30
+
+# NLP
+tqdm>=4.60
+
+# Optional: spaCy tokenizer (falls back to regex if not installed)
+# spacy>=3.4
+# After install: python -m spacy download en_core_web_sm  (not needed for rule-based English)
+
+# Optional: quality metrics
+# bert-score
+# mauve-text
+# sentence-transformers
+
+# NER-based sensitivity detection (NERaseText)
+flair>=0.13
