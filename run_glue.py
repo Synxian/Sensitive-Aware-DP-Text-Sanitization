@@ -16,6 +16,7 @@
 """Finetuning the library models for sequence classification on GLUE."""
 
 import dataclasses
+import json
 import logging
 import os
 import sys
@@ -199,12 +200,28 @@ def main():
             eval_result = trainer.evaluate(eval_dataset=eval_dataset)
 
             output_eval_file = os.path.join(training_args.output_dir, f"eval_results_{eval_dataset.args.task_name}.txt")
+            output_eval_json = os.path.join(training_args.output_dir, f"eval_results_{eval_dataset.args.task_name}.json")
             if trainer.is_world_process_zero():
                 with open(output_eval_file, "w") as writer:
                     logger.info("***** Eval results {} *****".format(eval_dataset.args.task_name))
                     for key, value in eval_result.items():
                         logger.info("  %s = %s", key, value)
                         writer.write("%s = %s\n" % (key, value))
+                with open(output_eval_json, "w", encoding="utf-8") as jf:
+                    json.dump(
+                        {
+                            "task": eval_dataset.args.task_name,
+                            "data_dir": data_args.data_dir,
+                            "model_name_or_path": model_args.model_name_or_path,
+                            "num_train_epochs": training_args.num_train_epochs,
+                            "learning_rate": training_args.learning_rate,
+                            "per_device_train_batch_size": training_args.per_device_train_batch_size,
+                            "seed": training_args.seed,
+                            "metrics": {k: float(v) for k, v in eval_result.items()},
+                        },
+                        jf,
+                        indent=2,
+                    )
 
             eval_results.update(eval_result)
 
