@@ -60,8 +60,8 @@ def _parse_args() -> SastdpExecutionArgs:
     return SastdpExecutionArgs(**parser.parse_args().__dict__)
 
 
-def _load_docs(args: SastdpExecutionArgs, tokenizer) -> list[SastdpDocument]:
-    """Load documents from train.csv, tokenize into space-separated words."""
+def _load_docs_csv(args: SastdpExecutionArgs, tokenizer) -> list[SastdpDocument]:
+    """Load i2b2-style CSV (text + text_id columns)."""
     data_file = os.path.join(args.data_dir, "train.csv")
     df = pd.read_csv(data_file)
     texts = df["text"].dropna()
@@ -75,6 +75,73 @@ def _load_docs(args: SastdpExecutionArgs, tokenizer) -> list[SastdpDocument]:
         doc = [token.text for token in tokenizer(text)]
         docs.append(SastdpDocument(text=" ".join(doc), text_id=text_id))
     return docs
+
+
+def _load_docs_glue_tsv(
+    args: SastdpExecutionArgs, tokenizer
+) -> tuple[list[SastdpDocument], dict]:
+    """Load SST-2 / QNLI from train.tsv + dev.tsv (mirrors santext_sample.py).
+
+    SST-2 columns: [0] sentence, [1] label. One doc per row.
+    QNLI columns:  [0] index, [1] question, [2] sentence, [-1] label.
+                   Two independent docs per row (suffixed _a and _b), re-paired
+                   on output by the converter script.
+    """
+    docs: list[SastdpDocument] = []
+    splits_meta: dict[str, dict] = {}
+
+    for split in ("train", "dev"):
+        path = os.path.join(args.data_dir, f"{split}.tsv")
+        rows_meta: list[dict] = []
+        with open(path, "r", encoding="utf-8") as f:
+            header = f.readline().rstrip("\n")
+            for row_idx, line in enumerate(
+                tqdm(f, desc=f"Loading {split}.tsv")
+            ):
+                parts = line.rstrip("\n").split("\t")
+                if args.task == "SST-2":
+                    text = parts[0]
+                    label = parts[1]
+                    text_id = f"sst2_{split}_{row_idx}"
+                    tokens = [t.text for t in tokenizer(text)]
+                    docs.append(
+                        SastdpDocument(text=" ".join(tokens), text_id=text_id)
+                    )
+                    rows_meta.append({"text_id": text_id, "label": label})
+                elif args.task == "QNLI":
+                    text1 = parts[1]
+                    text2 = parts[2]
+                    label = parts[-1]
+                    text_id_a = f"qnli_{split}_{row_idx}_a"
+                    text_id_b = f"qnli_{split}_{row_idx}_b"
+                    tokens1 = [t.text for t in tokenizer(text1)]
+                    tokens2 = [t.text for t in tokenizer(text2)]
+                    docs.append(
+                        SastdpDocument(text=" ".join(tokens1), text_id=text_id_a)
+                    )
+                    docs.append(
+                        SastdpDocument(text=" ".join(tokens2), text_id=text_id_b)
+                    )
+                    rows_meta.append(
+                        {
+                            "row_idx": row_idx,
+                            "text_id_a": text_id_a,
+                            "text_id_b": text_id_b,
+                            "label": label,
+                        }
+                    )
+        splits_meta[split] = {"header": header, "rows": rows_meta}
+
+    return docs, {"task": args.task, "splits": splits_meta}
+
+
+def _load_docs(
+    args: SastdpExecutionArgs, tokenizer
+) -> tuple[list[SastdpDocument], dict | None]:
+    """Dispatch on task. Returns (docs, task_metadata) — metadata is None for CSV."""
+    if args.task in ("SST-2", "QNLI"):
+        return _load_docs_glue_tsv(args, tokenizer)
+    return _load_docs_csv(args, tokenizer), None
 
 
 def main():
@@ -99,7 +166,7 @@ def main():
     embeddings = get_word_embeddings_and_mappings(args, words, sensitive_words)
 
     # ---- Load documents ----
-    docs = _load_docs(args, tokenizer)
+    docs, task_metadata = _load_docs(args, tokenizer)
     threads = min(args.threads, cpu_count())
 
     # ---- Build sanitizer and precompute distances ----
@@ -112,6 +179,16 @@ def main():
     )
     sanitizer = Sanitizer(config=config)
     sanitizer.precompute(words, embeddings)
+
+    # ---- Persist task metadata so the TSV converter can reassemble rows ----
+    if task_metadata is not None:
+        os.makedirs(config.replacements_output_dir, exist_ok=True)
+        metadata_path = os.path.join(
+            config.replacements_output_dir, "task_metadata.json"
+        )
+        with open(metadata_path, "w", encoding="utf-8") as mf:
+            json.dump(task_metadata, mf, indent=2)
+        logger.info("Wrote task metadata to %s", metadata_path)
 
     # ================================================================
     # Compute per-document epsilon_n (only for normal/plus with --redistribute)

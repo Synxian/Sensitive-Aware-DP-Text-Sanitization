@@ -11,6 +11,39 @@ from transformers import AutoTokenizer, AutoModelForTokenClassification, pipelin
 SENSITIVE_TAGS = ["PER", "LOC", "ORG"]
 
 
+def _load_text_samples(dataset_path, text_col):
+    """Return a flat list of text samples to tag.
+
+    Accepts:
+        - a .csv path -> read as CSV
+        - a .tsv path -> read as TSV
+        - a directory -> read train.tsv (+ dev.tsv if present) and concat
+    `text_col` may be a single column name (SST-2 style: one text column) or
+    a list of column names (QNLI style: question + sentence). Each column's
+    non-null values are appended to the returned list.
+    """
+    if os.path.isdir(dataset_path):
+        dfs = []
+        for split in ("train", "dev"):
+            split_path = os.path.join(dataset_path, f"{split}.tsv")
+            if os.path.exists(split_path):
+                dfs.append(pd.read_csv(split_path, sep="\t", on_bad_lines="skip"))
+        if not dfs:
+            raise FileNotFoundError(
+                f"No train.tsv or dev.tsv found under {dataset_path}"
+            )
+        df = pd.concat(dfs, ignore_index=True)
+    else:
+        sep = "\t" if dataset_path.endswith(".tsv") else ","
+        df = pd.read_csv(dataset_path, sep=sep)
+
+    cols = [text_col] if isinstance(text_col, str) else list(text_col)
+    samples = []
+    for col in cols:
+        samples.extend(df[col].dropna().astype(str).tolist())
+    return samples
+
+
 def build_flair_mapping(model_path, dataset, dataset_path, threshold, text_col, out_dir):
     save_path = os.path.join(
         out_dir,
@@ -24,7 +57,7 @@ def build_flair_mapping(model_path, dataset, dataset_path, threshold, text_col, 
             data = json.load(json_file)
         return data
     print(f"loading dataset from {dataset_path}")
-    df = pd.read_csv(dataset_path)
+    samples = _load_text_samples(dataset_path, text_col)
 
     flair.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     flair.logger.show_progress_bars = True
@@ -35,7 +68,7 @@ def build_flair_mapping(model_path, dataset, dataset_path, threshold, text_col, 
     def filter_tags(token):
         return token.score > threshold and any(tag in token.value for tag in SENSITIVE_TAGS)
 
-    for sample in tqdm(df[text_col], desc="Tagging dataset", total=len(df[text_col])):
+    for sample in tqdm(samples, desc="Tagging dataset", total=len(samples)):
         sentence = Sentence(sample.lower())
         tagger.predict(sentence, return_probabilities_for_all_classes=True)
         for word in sentence:
@@ -68,7 +101,7 @@ def build_hf_mapping(model_path, dataset, dataset_path, threshold, text_col, out
         return data
 
     print(f"Loading dataset from {dataset_path}")
-    df = pd.read_csv(dataset_path)
+    samples = _load_text_samples(dataset_path, text_col)
 
     print(f"Loading model from {model_path}")
     tokenizer = AutoTokenizer.from_pretrained(model_path, token="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")
@@ -91,7 +124,7 @@ def build_hf_mapping(model_path, dataset, dataset_path, threshold, text_col, out
     ]
     mapping = {}
     CHUNK_SIZE = 400
-    for text_row in tqdm(df[text_col], desc="Tagging dataset", total=len(df[text_col])):
+    for text_row in tqdm(samples, desc="Tagging dataset", total=len(samples)):
         chunks = len(text_row) // CHUNK_SIZE + 1
         for i in range(chunks):
             sample = text_row[i * CHUNK_SIZE : (i + 1) * CHUNK_SIZE]
@@ -135,15 +168,18 @@ def build_hf_mapping(model_path, dataset, dataset_path, threshold, text_col, out
 
 
 if __name__ == "__main__":
-    dataset = "mimic"
-    threshold = 0.6
-    dataset_path = "datasets/mimic/train.csv"
-    text_col = "text"
-    out_dir = "selective_output"
+    import argparse
 
-    build_flair_mapping("flair/ner-english-large", dataset, dataset_path, threshold, text_col, out_dir)
-    # ab_ai = "ab-ai/pii_model"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", default="mimic", help="Used for output filename: flair_<threshold>_<dataset>.json")
+    parser.add_argument("--dataset_path", default="datasets/mimic/train.csv", help=".csv / .tsv file or directory containing train.tsv (+ dev.tsv)")
+    parser.add_argument("--text_col", nargs="+", default=["text"], help="One column for SST-2 (e.g. 'sentence'), two for QNLI (e.g. 'question sentence')")
+    parser.add_argument("--threshold", type=float, default=0.6)
+    parser.add_argument("--out_dir", default="selective_output")
+    parser.add_argument("--model_path", default="flair/ner-english-large")
+    args = parser.parse_args()
 
-    # build_hf_mapping(
-    #    "tabularisai/eu-pii-safeguard", dataset, dataset_path, threshold, text_col, out_dir
-    # )
+    text_col = args.text_col[0] if len(args.text_col) == 1 else args.text_col
+    build_flair_mapping(
+        args.model_path, args.dataset, args.dataset_path, args.threshold, text_col, args.out_dir
+    )

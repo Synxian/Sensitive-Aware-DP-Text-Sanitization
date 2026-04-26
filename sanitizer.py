@@ -73,6 +73,12 @@ class Sanitizer:
     # Sensitive prob matrix (fixed epsilon_s, precomputed once)
     s_prob_matrix: np.ndarray | None = None
 
+    # Normal prob matrix at the fixed config epsilon. Used by sanitize_santext
+    # (always) and by sanitize_normal/plus when epsilon_n is None
+    # (i.e. no per-doc redistribution). For redistribute mode each call
+    # builds its own matrix and this stays as the no-redistribute fallback.
+    n_prob_matrix_fixed: np.ndarray | None = None
+
     @property
     def mixing_overhead(self) -> float:
         """L = ln(max(p/(1-p), (1-p)/p)) — extra LDP cost per word from mixing (Theorem 2).
@@ -138,6 +144,13 @@ class Sanitizer:
                 self.s_distance_matrix, s_mech_eps
             )
 
+        # Santext never varies epsilon per document, so build the normal
+        # prob matrix once here. For normal/plus the fixed matrix is built
+        # lazily on first call with epsilon_n=None (skipped when redistribute
+        # is on, which is the common case).
+        if self.config.method == SastdpMethod.SANTEXT:
+            self.n_prob_matrix_fixed = self._build_n_prob_matrix(self.config.epsilon)
+
     def _build_prob_matrix(self, distance_matrix: np.ndarray, eps: float) -> np.ndarray:
         """Apply the exponential mechanism: softmax(eps * -distance / (2 * sensitivity)).
 
@@ -180,7 +193,8 @@ class Sanitizer:
 
     def sanitize_santext(self, doc: SastdpDocument) -> SastdpDocumentStatistics:
         """Baseline: all in-vocab words use the same epsilon over full vocab."""
-        n_prob_matrix = self._build_n_prob_matrix(self.config.epsilon)
+        assert self.n_prob_matrix_fixed is not None, "Call precompute() first"
+        n_prob_matrix = self.n_prob_matrix_fixed
         new_doc = []
         total_epsilon = 0.0
         normal_word_count = 0
@@ -218,7 +232,12 @@ class Sanitizer:
         """
         assert self.s_prob_matrix is not None, "Call precompute() first"
         eps_n = epsilon_n if epsilon_n is not None else self.config.epsilon
-        n_prob_matrix = self._build_n_prob_matrix(eps_n)
+        if epsilon_n is None:
+            if self.n_prob_matrix_fixed is None:
+                self.n_prob_matrix_fixed = self._build_n_prob_matrix(eps_n)
+            n_prob_matrix = self.n_prob_matrix_fixed
+        else:
+            n_prob_matrix = self._build_n_prob_matrix(eps_n)
 
         new_doc = []
         total_epsilon = 0.0
@@ -272,7 +291,12 @@ class Sanitizer:
             f"epsilon_n ({eps_n}) must exceed mixing overhead "
             f"L={L:.4f} for method=plus with p={self.config.p}"
         )
-        n_prob_matrix = self._build_n_prob_matrix(eps_n_mech)
+        if epsilon_n is None:
+            if self.n_prob_matrix_fixed is None:
+                self.n_prob_matrix_fixed = self._build_n_prob_matrix(eps_n_mech)
+            n_prob_matrix = self.n_prob_matrix_fixed
+        else:
+            n_prob_matrix = self._build_n_prob_matrix(eps_n_mech)
         p = self.config.p
 
         new_doc = []
