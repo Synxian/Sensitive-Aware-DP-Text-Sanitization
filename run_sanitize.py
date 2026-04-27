@@ -1,7 +1,7 @@
 # Must be set BEFORE importing transformers (via flair)
 import os as _os
-_os.environ["HF_HUB_OFFLINE"] = "1"
-_os.environ["TRANSFORMERS_OFFLINE"] = "1"
+_os.environ.setdefault("HF_HUB_OFFLINE", "1")
+_os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 """Sanitize a GLUE-style dataset with Sensitivity-Aware DP.
 
@@ -31,8 +31,8 @@ import numpy as np
 
 from sanitizer import (get_tokenizer, build_vocab, filter_vocab,
                        load_glove, build_sensitive_words_ner,
-                       build_sensitive_words, cal_probability,
-                       compute_total_epsilon, sanitize_corpus)
+                       build_sensitive_words, SanitizerConfig, Sanitizer,
+                       compute_per_doc_epsilon, sanitize_corpus)
 
 logger = logging.getLogger(__name__)
 
@@ -195,17 +195,11 @@ def main():
         load_glove(args.embed_path, set(words), sensitive)
     logger.info("GloVe intersection: %d words", len(word2id))
 
-    # Probability matrices
-    logger.info("Building probability matrices (method=%s) …", args.method)
-    s_prob = n_prob = None
-    if args.method == "santext":
-        n_prob = cal_probability(all_embed, all_embed, args.epsilon)
-    elif args.method == "normal":
-        s_prob = cal_probability(s_embed,   all_embed, args.s_epsilon)
-        n_prob = cal_probability(n_embed,   all_embed, args.epsilon)
-    elif args.method == "plus":
-        s_prob = cal_probability(all_embed, s_embed,   args.s_epsilon)
-        n_prob = cal_probability(all_embed, n_embed,   args.epsilon)
+    # Build sanitizer
+    logger.info("Building distance matrices and sanitizer (method=%s) …", args.method)
+    config = SanitizerConfig(epsilon=args.epsilon, s_epsilon=args.s_epsilon, p=args.p, method=args.method)
+    sanitizer = Sanitizer(config)
+    sanitizer.precompute(word2id, sword2id, nword2id, list(words), all_embed, s_embed, n_embed)
 
     read  = READERS[args.task]
     write = WRITERS[args.task]
@@ -221,20 +215,18 @@ def main():
         max_s = args.max_samples if split == "train" else None
         docs, labels, header = read(in_path, tokenizer, max_samples=max_s)
 
-        sanitized = sanitize_corpus(
-            docs, word2id, sword2id, nword2id,
-            s_prob, n_prob, all_words,
-            method=args.method, p=args.p,
-            threads=args.threads, desc=f"  {split}",
-        )
-        write(out_path, sanitized, labels, header)
-
-        # Total epsilon = max per-document epsilon budget consumed
-        if args.method == "santext":
-            total_eps = compute_total_epsilon(docs, {}, 0.0, args.epsilon)
+        if args.method in ("normal", "plus"):
+            per_doc_epsilons = compute_per_doc_epsilon(docs, sanitizer)
         else:
-            total_eps = compute_total_epsilon(
-                docs, sword2id, args.s_epsilon, args.epsilon)
+            per_doc_epsilons = [None] * len(docs)
+            
+        results = sanitize_corpus(docs, sanitizer, per_doc_epsilons, threads=args.threads, desc=f"  {split}")
+        
+        sanitized_texts = [res[0] for res in results]
+        epsilons = [res[1] for res in results]
+        
+        write(out_path, sanitized_texts, labels, header)
+        total_eps = max(epsilons) if epsilons else 0.0
         stats[split] = {"examples": len(labels), "total_epsilon": total_eps}
         logger.info("Wrote %d examples → %s  (total_ε=%.2f)",
                     len(labels), out_path, total_eps)

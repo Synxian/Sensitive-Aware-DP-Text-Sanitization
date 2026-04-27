@@ -215,153 +215,214 @@ def build_sensitive_words(words: list[str], sensitive_pct: float = 0.5,
 
 
 # ---------------------------------------------------------------------------
-# Probability matrix
+# Object-Oriented Sanitizer (with per-document epsilon redistribution)
 # ---------------------------------------------------------------------------
 
-def cal_probability(embed_src: np.ndarray, embed_tgt: np.ndarray,
-                    epsilon: float) -> np.ndarray:
-    """Exponential mechanism using cosine similarity as utility.
+import math
+from dataclasses import dataclass, field
+from scipy.special import softmax
+from sklearn.metrics.pairwise import cosine_distances
+import multiprocessing
+from multiprocessing import Pool, cpu_count
 
-    P(w→w') = softmax(ε/2 · cosine_sim(w, w'))
+@dataclass
+class SanitizerConfig:
+    epsilon: float
+    s_epsilon: float
+    p: float = 0.5
+    method: str = "normal"
 
-    Cosine similarity ∈ [-1, 1] → sensitivity c = 1, matching the LDP
-    guarantee in the NERaseText paper. Uses float32 to halve memory.
-    """
-    e1 = np.asarray(embed_src, dtype=np.float32)
-    e2 = np.asarray(embed_tgt, dtype=np.float32)
-    sim    = cosine_similarity(e1, e2).astype(np.float32)
-    scores = (epsilon * sim / 2).astype(np.float64)
-    return softmax(scores, axis=1).astype(np.float32)
+@dataclass
+class Sanitizer:
+    config: SanitizerConfig
+    
+    vocab: list = field(default_factory=list)
+    word2id: dict = field(default_factory=dict)
+    sword2id: dict = field(default_factory=dict)
+    nword2id: dict = field(default_factory=dict)
+    
+    id2word: dict = field(default_factory=dict)
+    id2sword: dict = field(default_factory=dict)
+    id2nword: dict = field(default_factory=dict)
 
+    s_distance_matrix: np.ndarray = None
+    n_distance_matrix: np.ndarray = None
+    sensitivity: float = 1.0
 
-# ---------------------------------------------------------------------------
-# Total epsilon tracking
-# ---------------------------------------------------------------------------
+    s_prob_matrix: np.ndarray = None
+    n_prob_matrix_fixed: np.ndarray = None
 
-def compute_total_epsilon(
-    docs: list[list[str]],
-    sword2id: dict,
-    epsilon_s: float,
-    epsilon_n: float,
-) -> float:
-    """Compute total privacy budget consumed by the corpus.
+    @property
+    def mixing_overhead(self) -> float:
+        if self.config.method != "plus":
+            return 0.0
+        p = self.config.p
+        if not (0.0 < p < 1.0):
+            raise ValueError(f"p must be in (0, 1) for method=plus, got p={p}")
+        return math.log(max(p / (1 - p), (1 - p) / p))
 
-    Per the paper: total ε = max over all documents of
-    (n_sensitive_tokens * ε_s + n_normal_tokens * ε_n).
+    def precompute(self, word2id, sword2id, nword2id, vocab, all_embed, s_embed, n_embed):
+        self.vocab = vocab
+        self.word2id = word2id
+        self.sword2id = sword2id
+        self.nword2id = nword2id
+        self.id2word = {v: k for k, v in word2id.items()}
+        self.id2sword = {v: k for k, v in sword2id.items()}
+        self.id2nword = {v: k for k, v in nword2id.items()}
+        
+        if self.config.method == "plus":
+            # PLUS validation (Copilot fix!)
+            if not sword2id or not nword2id:
+                raise ValueError("method='plus' requires non-empty sensitive and normal vocabularies.")
 
-    Args:
-        docs:      tokenized documents
-        sword2id:  sensitive word → index mapping (from load_glove)
-        epsilon_s: privacy budget for sensitive words
-        epsilon_n: privacy budget for normal words
+        if self.config.method == "normal":
+            self.s_distance_matrix = cosine_distances(s_embed, all_embed)
+            self.n_distance_matrix = cosine_distances(n_embed, all_embed)
+        elif self.config.method == "plus":
+            self.s_distance_matrix = cosine_distances(all_embed, s_embed)
+            self.n_distance_matrix = cosine_distances(all_embed, n_embed)
+        elif self.config.method == "santext":
+            self.n_distance_matrix = cosine_distances(all_embed, all_embed)
+            
+        if self.s_distance_matrix is not None:
+            L = self.mixing_overhead
+            s_mech_eps = self.config.s_epsilon - L
+            assert s_mech_eps > 0, "s_epsilon must exceed mixing overhead L"
+            self.s_prob_matrix = self._build_prob_matrix(self.s_distance_matrix, s_mech_eps)
+            
+        if self.config.method == "santext":
+            self.n_prob_matrix_fixed = self._build_n_prob_matrix(self.config.epsilon)
 
-    Returns:
-        Maximum total epsilon across all documents.
-    """
-    max_eps = 0.0
-    for doc in docs:
-        eps = sum(epsilon_s if w.lower() in sword2id else epsilon_n for w in doc)
-        if eps > max_eps:
-            max_eps = eps
-    return max_eps
+    def _build_prob_matrix(self, distance_matrix, eps):
+        return softmax(eps * (-distance_matrix) / (2 * self.sensitivity), axis=1)
 
+    def _build_n_prob_matrix(self, epsilon_n):
+        return self._build_prob_matrix(self.n_distance_matrix, epsilon_n)
 
-# ---------------------------------------------------------------------------
-# Sanitization (multiprocessing via module-level _W globals)
-# ---------------------------------------------------------------------------
+    def count_words(self, doc: list[str]):
+        ns = nn = n_oov = 0
+        for raw_word in doc:
+            w = raw_word.lower()
+            if w in self.word2id:
+                if w in self.sword2id: ns += 1
+                else: nn += 1
+            else: n_oov += 1
+        return ns, nn, n_oov
+        
+    def sanitize_santext(self, doc: list[str]):
+        n_prob_matrix = self.n_prob_matrix_fixed
+        out = []
+        tot_eps = 0.0
+        for raw_word in doc:
+            w = raw_word.lower()
+            if w in self.word2id:
+                prob = n_prob_matrix[self.word2id[w]]
+                out.append(self.id2word[np.random.choice(len(prob), p=prob)])
+                tot_eps += self.config.epsilon
+            else:
+                out.append(self.vocab[np.random.randint(len(self.vocab))])
+        return " ".join(out), tot_eps
 
-_W: dict = {}
-
-
-def _init_worker(word2id, sword2id, nword2id,
-                 s_prob, n_prob, all_words, p, method):
-    _W.update(dict(
-        word2id=word2id, sword2id=sword2id, nword2id=nword2id,
-        id2word={v: k for k, v in word2id.items()},
-        id2sword={v: k for k, v in sword2id.items()},
-        id2nword={v: k for k, v in nword2id.items()},
-        s_prob=s_prob, n_prob=n_prob,
-        all_words=all_words, p=p, method=method,
-    ))
-
-
-def _oov_word() -> str:
-    return _W["all_words"][np.random.randint(len(_W["all_words"]))]
-
-
-def _sample(row: np.ndarray, id2word: dict) -> str:
-    return id2word[np.random.choice(len(row), p=row)]
-
-
-def _sanitize_santext(doc):
-    w2i, i2w, prob = _W["word2id"], _W["id2word"], _W["n_prob"]
-    out = []
-    for tok in doc:
-        w = tok.lower()
-        out.append(_sample(prob[w2i[w]], i2w) if w in w2i else _oov_word())
-    return " ".join(out)
-
-
-def _sanitize_normal(doc):
-    sw2i, nw2i = _W["sword2id"], _W["nword2id"]
-    i2w = _W["id2word"]
-    s_prob, n_prob = _W["s_prob"], _W["n_prob"]
-    out = []
-    for tok in doc:
-        w = tok.lower()
-        if w in sw2i:   out.append(_sample(s_prob[sw2i[w]], i2w))
-        elif w in nw2i: out.append(_sample(n_prob[nw2i[w]], i2w))
-        else:           out.append(_oov_word())
-    return " ".join(out)
-
-
-def _sanitize_plus(doc):
-    w2i, sw2i = _W["word2id"], _W["sword2id"]
-    i2sw, i2nw = _W["id2sword"], _W["id2nword"]
-    s_prob, n_prob, p = _W["s_prob"], _W["n_prob"], _W["p"]
-    out = []
-    for tok in doc:
-        w = tok.lower()
-        if w not in w2i:
-            out.append(_oov_word()); continue
-        idx  = w2i[w]
-        flip = np.random.random()
-        if w in sw2i:
-            out.append(_sample(s_prob[idx], i2sw) if flip <= p
-                       else _sample(n_prob[idx], i2nw))
+    def sanitize_normal(self, doc: list[str], epsilon_n=None):
+        eps_n = epsilon_n if epsilon_n is not None else self.config.epsilon
+        if epsilon_n is None:
+            if self.n_prob_matrix_fixed is None: self.n_prob_matrix_fixed = self._build_n_prob_matrix(eps_n)
+            n_prob_matrix = self.n_prob_matrix_fixed
         else:
-            out.append(_sample(n_prob[idx], i2nw) if flip <= p
-                       else _sample(s_prob[idx], i2sw))
-    return " ".join(out)
+            n_prob_matrix = self._build_n_prob_matrix(eps_n)
+            
+        out = []
+        tot_eps = 0.0
+        for raw_word in doc:
+            w = raw_word.lower()
+            if w in self.word2id:
+                if w in self.sword2id:
+                    prob = self.s_prob_matrix[self.sword2id[w]]
+                    out.append(self.id2word[np.random.choice(len(prob), p=prob)])
+                    tot_eps += self.config.s_epsilon
+                else:
+                    prob = n_prob_matrix[self.nword2id[w]]
+                    out.append(self.id2word[np.random.choice(len(prob), p=prob)])
+                    tot_eps += eps_n
+            else:
+                out.append(self.vocab[np.random.randint(len(self.vocab))])
+        return " ".join(out), tot_eps
 
+    def sanitize_plus(self, doc: list[str], epsilon_n=None):
+        eps_n = epsilon_n if epsilon_n is not None else self.config.epsilon
+        L = self.mixing_overhead
+        eps_n_mech = eps_n - L
+        
+        if epsilon_n is None:
+            if self.n_prob_matrix_fixed is None: self.n_prob_matrix_fixed = self._build_n_prob_matrix(eps_n_mech)
+            n_prob_matrix = self.n_prob_matrix_fixed
+        else:
+            n_prob_matrix = self._build_n_prob_matrix(eps_n_mech)
+            
+        out = []
+        tot_eps = 0.0
+        p = self.config.p
+        for raw_word in doc:
+            w = raw_word.lower()
+            if w in self.word2id:
+                flip = np.random.random()
+                idx = self.word2id[w]
+                if w in self.sword2id:
+                    if flip <= p:
+                        prob = self.s_prob_matrix[idx]
+                        out.append(self.id2sword[np.random.choice(len(prob), p=prob)])
+                        tot_eps += self.config.s_epsilon
+                    else:
+                        prob = n_prob_matrix[idx]
+                        out.append(self.id2nword[np.random.choice(len(prob), p=prob)])
+                        tot_eps += eps_n
+                else:
+                    if flip <= p:
+                        prob = n_prob_matrix[idx]
+                        out.append(self.id2nword[np.random.choice(len(prob), p=prob)])
+                        tot_eps += eps_n
+                    else:
+                        prob = self.s_prob_matrix[idx]
+                        out.append(self.id2sword[np.random.choice(len(prob), p=prob)])
+                        tot_eps += self.config.s_epsilon
+            else:
+                out.append(self.vocab[np.random.randint(len(self.vocab))])
+        return " ".join(out), tot_eps
 
-def _dispatch(doc):
-    m = _W["method"]
-    if m == "santext": return _sanitize_santext(doc)
-    if m == "normal":  return _sanitize_normal(doc)
-    if m == "plus":    return _sanitize_plus(doc)
-    raise ValueError(f"Unknown method: {m!r}")
+def compute_per_doc_epsilon(docs: list[list[str]], sanitizer: Sanitizer) -> list:
+    eps = sanitizer.config.epsilon
+    eps_s = sanitizer.config.s_epsilon
+    result = []
+    for doc in docs:
+        ns, nn, _ = sanitizer.count_words(doc)
+        if nn == 0:
+            result.append(None)
+            continue
+        eps_t = eps * (ns + nn)
+        eps_n = (eps_t - ns * eps_s) / nn
+        if eps_n <= 0: eps_n = 0.01
+        result.append(eps_n)
+    return result
 
+_W_sanitizer = None
+def _init_worker(san):
+    global _W_sanitizer
+    _W_sanitizer = san
 
-def sanitize_corpus(
-    docs:      list[list[str]],
-    word2id:   dict,
-    sword2id:  dict,
-    nword2id:  dict,
-    s_prob:    "np.ndarray | None",
-    n_prob:    "np.ndarray | None",
-    all_words: list[str],
-    method:    str,
-    p:         float = 0.5,
-    threads:   int   = 4,
-    desc:      str   = "Sanitizing",
-) -> list[str]:
-    """Sanitize tokenized documents in parallel. Returns list of strings."""
+def _dispatch(args):
+    doc, eps_n = args
+    if _W_sanitizer.config.method == "santext": return _W_sanitizer.sanitize_santext(doc)
+    if _W_sanitizer.config.method == "normal": return _W_sanitizer.sanitize_normal(doc, eps_n)
+    if _W_sanitizer.config.method == "plus": return _W_sanitizer.sanitize_plus(doc, eps_n)
+
+def sanitize_corpus(docs, sanitizer, per_doc_epsilons, threads=4, desc="Sanitizing"):
+    work_items = list(zip(docs, per_doc_epsilons))
     threads = min(threads, cpu_count())
-    with Pool(threads, initializer=_init_worker,
-              initargs=(word2id, sword2id, nword2id,
-                        s_prob, n_prob, all_words, p, method)) as pool:
-        return list(tqdm(
-            pool.imap(_dispatch, docs, chunksize=32),
-            total=len(docs), desc=desc,
-        ))
+    if threads <= 1:
+        _init_worker(sanitizer)
+        from tqdm import tqdm
+        return [_dispatch(item) for item in tqdm(work_items, desc=desc)]
+    
+    with Pool(threads, initializer=_init_worker, initargs=(sanitizer,)) as pool:
+        from tqdm import tqdm
+        return list(tqdm(pool.imap(_dispatch, work_items, chunksize=32), total=len(docs), desc=desc))
