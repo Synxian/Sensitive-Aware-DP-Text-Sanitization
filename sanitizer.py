@@ -225,6 +225,8 @@ from sklearn.metrics.pairwise import cosine_distances, euclidean_distances
 import multiprocessing
 from multiprocessing import Pool, cpu_count
 
+from pydantic_models.satsdp import SastdpDocument
+
 @dataclass
 class SanitizerConfig:
     epsilon: float
@@ -302,9 +304,9 @@ class Sanitizer:
     def _build_n_prob_matrix(self, epsilon_n):
         return self._build_prob_matrix(self.n_distance_matrix, epsilon_n)
 
-    def count_words(self, doc: list[str]):
+    def count_words(self, doc: SastdpDocument):
         ns = nn = n_oov = 0
-        for raw_word in doc:
+        for raw_word in doc.text.split():
             w = raw_word.lower()
             if w in self.word2id:
                 if w in self.sword2id: ns += 1
@@ -312,11 +314,11 @@ class Sanitizer:
             else: n_oov += 1
         return ns, nn, n_oov
         
-    def sanitize_santext(self, doc: list[str]):
+    def sanitize_santext(self, doc: SastdpDocument):
         n_prob_matrix = self.n_prob_matrix_fixed
         out = []
         tot_eps = 0.0
-        for raw_word in doc:
+        for raw_word in doc.text.split():
             w = raw_word.lower()
             if w in self.word2id:
                 prob = n_prob_matrix[self.word2id[w]]
@@ -326,7 +328,7 @@ class Sanitizer:
                 out.append(self.vocab[np.random.randint(len(self.vocab))])
         return " ".join(out), tot_eps
 
-    def sanitize_normal(self, doc: list[str], epsilon_n=None):
+    def sanitize_normal(self, doc: SastdpDocument, epsilon_n=None):
         eps_n = epsilon_n if epsilon_n is not None else self.config.epsilon
         if epsilon_n is None:
             if self.n_prob_matrix_fixed is None: self.n_prob_matrix_fixed = self._build_n_prob_matrix(eps_n)
@@ -336,7 +338,7 @@ class Sanitizer:
             
         out = []
         tot_eps = 0.0
-        for raw_word in doc:
+        for raw_word in doc.text.split():
             w = raw_word.lower()
             if w in self.word2id:
                 if w in self.sword2id:
@@ -351,7 +353,7 @@ class Sanitizer:
                 out.append(self.vocab[np.random.randint(len(self.vocab))])
         return " ".join(out), tot_eps
 
-    def sanitize_plus(self, doc: list[str], epsilon_n=None):
+    def sanitize_plus(self, doc: SastdpDocument, epsilon_n=None):
         eps_n = epsilon_n if epsilon_n is not None else self.config.epsilon
         L = self.mixing_overhead
         eps_n_mech = eps_n - L
@@ -365,7 +367,7 @@ class Sanitizer:
         out = []
         tot_eps = 0.0
         p = self.config.p
-        for raw_word in doc:
+        for raw_word in doc.text.split():
             w = raw_word.lower()
             if w in self.word2id:
                 flip = np.random.random()
@@ -392,7 +394,7 @@ class Sanitizer:
                 out.append(self.vocab[np.random.randint(len(self.vocab))])
         return " ".join(out), tot_eps
 
-def compute_per_doc_epsilon(docs: list[list[str]], sanitizer: Sanitizer) -> list:
+def compute_per_doc_epsilon(docs: list[SastdpDocument], sanitizer: Sanitizer) -> list:
     eps = sanitizer.config.epsilon
     eps_s = sanitizer.config.s_epsilon
     result = []

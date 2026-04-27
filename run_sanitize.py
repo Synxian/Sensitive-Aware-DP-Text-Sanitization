@@ -29,6 +29,7 @@ import random
 
 import numpy as np
 
+from pydantic_models.satsdp import SastdpDocument
 from sanitizer import (get_tokenizer, build_vocab, filter_vocab,
                        load_glove, build_sensitive_words_ner,
                        build_sensitive_words, SanitizerConfig, Sanitizer,
@@ -51,7 +52,8 @@ def read_sst2(path, tokenizer, max_samples=None):
             parts = line.strip().split("\t")
             if len(parts) < 2:
                 continue
-            docs.append([tok.text for tok in tokenizer(parts[0])])
+            doc_text = " ".join([tok.text for tok in tokenizer(parts[0])])
+            docs.append(SastdpDocument(text=doc_text, text_id=i))
             labels.append(parts[1])
     return docs, labels, header
 
@@ -75,8 +77,10 @@ def read_qnli(path, tokenizer, max_samples=None):
             parts = line.strip().split("\t")
             if len(parts) < 4:
                 continue
-            docs.append([tok.text for tok in tokenizer(parts[1])])
-            docs.append([tok.text for tok in tokenizer(parts[2])])
+            doc_text1 = " ".join([tok.text for tok in tokenizer(parts[1])])
+            docs.append(SastdpDocument(text=doc_text1, text_id=f"{i}_1"))
+            doc_text2 = " ".join([tok.text for tok in tokenizer(parts[2])])
+            docs.append(SastdpDocument(text=doc_text2, text_id=f"{i}_2"))
             labels.append(parts[3])
     return docs, labels, header
 
