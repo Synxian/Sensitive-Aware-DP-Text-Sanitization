@@ -29,7 +29,6 @@ import random
 
 import numpy as np
 
-from pydantic_models.satsdp import SastdpDocument
 from sanitizer import (get_tokenizer, build_vocab, filter_vocab,
                        load_glove, build_sensitive_words_ner,
                        build_sensitive_words, SanitizerConfig, Sanitizer,
@@ -52,8 +51,7 @@ def read_sst2(path, tokenizer, max_samples=None):
             parts = line.strip().split("\t")
             if len(parts) < 2:
                 continue
-            doc_text = " ".join([tok.text for tok in tokenizer(parts[0])])
-            docs.append(SastdpDocument(text=doc_text, text_id=i))
+            docs.append([tok.text for tok in tokenizer(parts[0])])
             labels.append(parts[1])
     return docs, labels, header
 
@@ -77,10 +75,8 @@ def read_qnli(path, tokenizer, max_samples=None):
             parts = line.strip().split("\t")
             if len(parts) < 4:
                 continue
-            doc_text1 = " ".join([tok.text for tok in tokenizer(parts[1])])
-            docs.append(SastdpDocument(text=doc_text1, text_id=f"{i}_1"))
-            doc_text2 = " ".join([tok.text for tok in tokenizer(parts[2])])
-            docs.append(SastdpDocument(text=doc_text2, text_id=f"{i}_2"))
+            docs.append([tok.text for tok in tokenizer(parts[1])])
+            docs.append([tok.text for tok in tokenizer(parts[2])])
             labels.append(parts[3])
     return docs, labels, header
 
@@ -127,6 +123,8 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--task",     required=True, choices=["sst2", "qnli"])
     p.add_argument("--method",   required=True, choices=["santext", "normal", "plus"])
+    p.add_argument("--distance_metric", default="cosine", choices=["cosine", "euclidean"],
+                   help="Distance metric for exponential mechanism (default: cosine)")
     p.add_argument("--epsilon",  type=float, default=10.0,
                    help="Privacy budget ε_n for normal words")
     p.add_argument("--s_epsilon", type=float, default=None,
@@ -201,7 +199,7 @@ def main():
 
     # Build sanitizer
     logger.info("Building distance matrices and sanitizer (method=%s) …", args.method)
-    config = SanitizerConfig(epsilon=args.epsilon, s_epsilon=args.s_epsilon, p=args.p, method=args.method)
+    config = SanitizerConfig(epsilon=args.epsilon, s_epsilon=args.s_epsilon, p=args.p, method=args.method, distance_metric=args.distance_metric)
     sanitizer = Sanitizer(config)
     sanitizer.precompute(word2id, sword2id, nword2id, list(words), all_embed, s_embed, n_embed)
 
