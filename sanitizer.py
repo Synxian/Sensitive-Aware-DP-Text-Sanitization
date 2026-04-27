@@ -221,7 +221,7 @@ def build_sensitive_words(words: list[str], sensitive_pct: float = 0.5,
 import math
 from dataclasses import dataclass, field
 from scipy.special import softmax
-from sklearn.metrics.pairwise import cosine_distances
+from sklearn.metrics.pairwise import cosine_distances, euclidean_distances
 import multiprocessing
 from multiprocessing import Pool, cpu_count
 
@@ -231,6 +231,7 @@ class SanitizerConfig:
     s_epsilon: float
     p: float = 0.5
     method: str = "normal"
+    distance_metric: str = "cosine"
 
 @dataclass
 class Sanitizer:
@@ -275,14 +276,16 @@ class Sanitizer:
             if not sword2id or not nword2id:
                 raise ValueError("method='plus' requires non-empty sensitive and normal vocabularies.")
 
+        metric_fn = cosine_distances if self.config.distance_metric == "cosine" else euclidean_distances
+
         if self.config.method == "normal":
-            self.s_distance_matrix = cosine_distances(s_embed, all_embed)
-            self.n_distance_matrix = cosine_distances(n_embed, all_embed)
+            self.s_distance_matrix = metric_fn(s_embed, all_embed)
+            self.n_distance_matrix = metric_fn(n_embed, all_embed)
         elif self.config.method == "plus":
-            self.s_distance_matrix = cosine_distances(all_embed, s_embed)
-            self.n_distance_matrix = cosine_distances(all_embed, n_embed)
+            self.s_distance_matrix = metric_fn(all_embed, s_embed)
+            self.n_distance_matrix = metric_fn(all_embed, n_embed)
         elif self.config.method == "santext":
-            self.n_distance_matrix = cosine_distances(all_embed, all_embed)
+            self.n_distance_matrix = metric_fn(all_embed, all_embed)
             
         if self.s_distance_matrix is not None:
             L = self.mixing_overhead

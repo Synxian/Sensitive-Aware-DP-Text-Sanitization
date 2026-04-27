@@ -75,6 +75,7 @@ def main():
     p.add_argument("--methods",  nargs="+", default=["santext", "normal", "plus"],
                    choices=["santext", "normal", "plus"])
     p.add_argument("--epsilons", nargs="+", type=float, default=[1, 3, 5, 10, 20])
+    p.add_argument("--distance_metric", default="cosine", choices=["cosine", "euclidean"])
     p.add_argument("--p_values", nargs="+", type=float, default=[0.7])
     p.add_argument("--no_ner", action="store_true",
                    help="Disable NER; fall back to frequency-based detection")
@@ -129,6 +130,7 @@ def main():
                        "--p",           str(cfg["p"]),
                        "--data_dir",    data_dir,
                        "--embed_path",  args.embed_path,
+                       "--distance_metric", args.distance_metric,
                        "--output_dir",  san_dir,
                        "--min_freq",    str(args.min_freq),
                        "--seed",        str(args.seed),
