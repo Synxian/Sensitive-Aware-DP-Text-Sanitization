@@ -4,7 +4,7 @@ import os
 import numpy as np
 from tqdm import tqdm
 
-from utils_custext import get_vocab_SST2, get_vocab_QNLI, get_vocab_text, word_normalize
+from text_utils import get_vocab_SST2, get_vocab_QNLI, get_vocab_text, word_normalize
 from pydantic_models.satsdp import SastdpExecutionArgs, SastdpEmbeddingAndMappings
 
 
