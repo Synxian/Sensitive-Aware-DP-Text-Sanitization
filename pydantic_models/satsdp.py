@@ -26,6 +26,7 @@ class SastdpExecutionArgs(BaseModel):
     sensitive_words_file_path: str | None = None
     language: str
     redistribute: bool = True
+    distance: str = "cosine"
     corpus_statistics: dict[str, float] = {}
 
     @property

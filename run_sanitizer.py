@@ -57,6 +57,8 @@ def _parse_args() -> SastdpExecutionArgs:
     parser.add_argument("--sensitive_words_file_path", type=str, default="./selective_output/sensitive_mapping/0.6_i2b2.json")
     parser.add_argument("--language", type=str, default="en")
     parser.add_argument("--redistribute", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--distance", choices=["cosine", "euclidean"], default="cosine",
+                        help="cosine (default, DP-correct) or euclidean (matches santext_sample.py reference)")
     return SastdpExecutionArgs(**parser.parse_args().__dict__)
 
 
@@ -176,6 +178,7 @@ def main():
         p=args.p,
         method=SastdpMethod(args.method),
         replacements_output_dir=args.replacements_output_dir,
+        distance=args.distance,
     )
     sanitizer = Sanitizer(config=config)
     sanitizer.precompute(words, embeddings)
