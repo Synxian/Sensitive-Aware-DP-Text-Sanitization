@@ -1,9 +1,10 @@
 from transformers import AutoTokenizer
 import mauve
 
+
 def compute_mauve(originales, sanitizados, device):
     tokenizer = AutoTokenizer.from_pretrained("gpt2-large")
-    max_tokens = 1024  # HARD MAUVE LIMIT
+    max_tokens = 1024
 
     def chunk_text(text):
         input_ids = tokenizer(
@@ -14,14 +15,12 @@ def compute_mauve(originales, sanitizados, device):
             return_tensors=None
         )["input_ids"]
 
-        # split safely into <=1024-token chunks
         chunks = []
         for i in range(0, len(input_ids), max_tokens):
             chunk_ids = input_ids[i:i + max_tokens]
             chunk_text = tokenizer.decode(chunk_ids, skip_special_tokens=True).strip()
             if chunk_text:
                 chunks.append(chunk_text)
-
         return chunks
 
     p_text, q_text = [], []

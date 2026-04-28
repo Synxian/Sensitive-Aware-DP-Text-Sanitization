@@ -1,13 +1,13 @@
 """Class-based sensitivity-aware DP text sanitization.
 
-Replaces the global-variable pattern in nandptextsan.py with a single
+Replaces the global-variable pattern in sanitize_algorithms.py with a single
 Sanitizer object that holds all state. Supports per-document epsilon
 redistribution: SanText runs first to establish a budget ceiling per text,
 then Ours/Ours+ redistribute the saved sensitive budget to normal words.
 
 Usage:
     sanitizer = Sanitizer(config)
-    sanitizer.precompute(embeddings)
+    sanitizer.precompute(words, embeddings)
 
     # SanText pass (fixed epsilon for all words)
     stats = sanitizer.sanitize_santext(doc)
@@ -24,11 +24,11 @@ from scipy.special import softmax
 from sklearn.metrics.pairwise import cosine_distances, euclidean_distances
 from dataclasses import dataclass, field
 
-from pydantic_models.satsdp import (
-    SastdpDocument,
-    SastdpDocumentStatistics,
-    SastdpEmbeddingAndMappings,
-    SastdpMethod,
+from pydantic_models.sanitizerdp import (
+    SanitizerDPDocument,
+    SanitizerDPDocumentStatistics,
+    SanitizerDPEmbeddingAndMappings,
+    SanitizerDPMethod,
 )
 
 
@@ -37,12 +37,9 @@ class SanitizerConfig:
     epsilon: float
     s_epsilon: float
     p: float = 0.7
-    method: SastdpMethod = SastdpMethod.NORMAL
+    method: SanitizerDPMethod = SanitizerDPMethod.NORMAL
+    distance_metric: str = "cosine"
     replacements_output_dir: str = "replacements"
-    # "cosine" (current default — bounded sensitivity, DP-correct) or
-    # "euclidean" (matches the original santext_sample.py reference,
-    # not DP-correct without dividing by d_max but useful for parity tests).
-    distance: str = "cosine"
 
 
 @dataclass
@@ -68,34 +65,26 @@ class Sanitizer:
     s_distance_matrix: np.ndarray | None = None
     n_distance_matrix: np.ndarray | None = None
 
-    # Sensitivity of the utility function u(x,y) = -cosine_distance(x,y).
-    # Cosine distance is in [0, 1] for non-negative vectors (like GloVe),
-    # or [0, 2] in general. This is a public fixed value, data-independent,
-    # so it preserves DP (unlike the previous euclidean d_max approach).
+    # Sensitivity of the utility function u(x,y) = -distance(x,y).
     sensitivity: float = 1.0
 
     # Sensitive prob matrix (fixed epsilon_s, precomputed once)
     s_prob_matrix: np.ndarray | None = None
 
-    # Normal prob matrix at the fixed config epsilon. Used by sanitize_santext
-    # (always) and by sanitize_normal/plus when epsilon_n is None
-    # (i.e. no per-doc redistribution). For redistribute mode each call
-    # builds its own matrix and this stays as the no-redistribute fallback.
+    # Normal prob matrix at the fixed config epsilon.
     n_prob_matrix_fixed: np.ndarray | None = None
 
     @property
     def mixing_overhead(self) -> float:
-        """L = ln(max(p/(1-p), (1-p)/p)) — extra LDP cost per word from mixing (Theorem 2).
-
-        For method != plus, returns 0.  Requires p in (0, 1) exclusive.
-        """
-        if self.config.method != SastdpMethod.PLUS:
+        """L = ln(max(p/(1-p), (1-p)/p)) — extra LDP cost per word from mixing."""
+        if self.config.method != SanitizerDPMethod.PLUS:
             return 0.0
         p = self.config.p
-        assert 0.0 < p < 1.0, f"p must be in (0, 1) for method=plus, got p={p}"
+        if not (0.0 < p < 1.0):
+            raise ValueError(f"p must be in (0, 1) for method=plus, got p={p}")
         return math.log(max(p / (1 - p), (1 - p) / p))
 
-    def precompute(self, vocab: list[str], embeddings: SastdpEmbeddingAndMappings):
+    def precompute(self, vocab: list[str], embeddings: SanitizerDPEmbeddingAndMappings):
         """Compute distance matrices and fixed sensitive prob matrix.
 
         Call once after loading embeddings. This is the expensive step.
@@ -108,42 +97,28 @@ class Sanitizer:
         self.id2sword = {v: k for k, v in self.sword2id.items()}
         self.id2nword = {v: k for k, v in self.nword2id.items()}
 
-        if self.config.distance == "cosine":
-            distance_fn = cosine_distances
-        elif self.config.distance == "euclidean":
-            distance_fn = euclidean_distances
-        else:
-            raise ValueError(f"Unknown distance: {self.config.distance!r}. Expected 'cosine' or 'euclidean'.")
+        if self.config.method == SanitizerDPMethod.PLUS:
+            if not self.sword2id or not self.nword2id:
+                raise ValueError("method='plus' requires non-empty sensitive and normal vocabularies.")
 
-        if self.config.method == SastdpMethod.NORMAL:
-            # s_dist: |V_s| x |V_all|, n_dist: |V_n| x |V_all|
-            self.s_distance_matrix = distance_fn(
-                embeddings.sensitive_word_embed, embeddings.all_word_embed
-            )
-            self.n_distance_matrix = distance_fn(
-                embeddings.normal_word_embed, embeddings.all_word_embed
-            )
-        elif self.config.method == SastdpMethod.PLUS:
-            # s_dist: |V_all| x |V_s|, n_dist: |V_all| x |V_n|
-            self.s_distance_matrix = distance_fn(
-                embeddings.all_word_embed, embeddings.sensitive_word_embed
-            )
-            self.n_distance_matrix = distance_fn(
-                embeddings.all_word_embed, embeddings.normal_word_embed
-            )
-        elif self.config.method == SastdpMethod.SANTEXT:
-            # Single square matrix
-            self.n_distance_matrix = distance_fn(
-                embeddings.all_word_embed, embeddings.all_word_embed
-            )
+        metric_fn = cosine_distances if self.config.distance_metric == "cosine" else euclidean_distances
 
-        # Cosine distance is in [0, 1] for non-negative vectors, [0, 2] general.
-        # Sensitivity is fixed and public, no need to compute from data.
+        if self.config.method == SanitizerDPMethod.NORMAL:
+            self.s_distance_matrix = metric_fn(
+                embeddings.sensitive_word_embed, embeddings.all_word_embed)
+            self.n_distance_matrix = metric_fn(
+                embeddings.normal_word_embed, embeddings.all_word_embed)
+        elif self.config.method == SanitizerDPMethod.PLUS:
+            self.s_distance_matrix = metric_fn(
+                embeddings.all_word_embed, embeddings.sensitive_word_embed)
+            self.n_distance_matrix = metric_fn(
+                embeddings.all_word_embed, embeddings.normal_word_embed)
+        elif self.config.method == SanitizerDPMethod.SANTEXT:
+            self.n_distance_matrix = metric_fn(
+                embeddings.all_word_embed, embeddings.all_word_embed)
+
         self.sensitivity = 1.0
 
-        # Sensitive prob matrix uses fixed epsilon_s (same for every document).
-        # For Plus, subtract the mixing overhead L so that the total LDP cost
-        # per sensitive word is s_epsilon (= L + mechanism_epsilon).
         if self.s_distance_matrix is not None:
             L = self.mixing_overhead
             s_mech_eps = self.config.s_epsilon - L
@@ -152,40 +127,25 @@ class Sanitizer:
                 f"L={L:.4f} for method=plus with p={self.config.p}"
             )
             self.s_prob_matrix = self._build_prob_matrix(
-                self.s_distance_matrix, s_mech_eps
-            )
+                self.s_distance_matrix, s_mech_eps)
 
-        # Santext never varies epsilon per document, so build the normal
-        # prob matrix once here. For normal/plus the fixed matrix is built
-        # lazily on first call with epsilon_n=None (skipped when redistribute
-        # is on, which is the common case).
-        if self.config.method == SastdpMethod.SANTEXT:
+        if self.config.method == SanitizerDPMethod.SANTEXT:
             self.n_prob_matrix_fixed = self._build_n_prob_matrix(self.config.epsilon)
 
     def _build_prob_matrix(self, distance_matrix: np.ndarray, eps: float) -> np.ndarray:
-        """Apply the exponential mechanism: softmax(eps * -distance / (2 * sensitivity)).
-
-        The division by sensitivity is required by the exponential mechanism
-        to guarantee eps-DP. Without it, the effective epsilon is scaled by
-        the max distance in the embedding space.
-        """
+        """Apply the exponential mechanism: softmax(eps * -distance / (2 * sensitivity))."""
         return softmax(eps * (-distance_matrix) / (2 * self.sensitivity), axis=1)
 
     def _build_n_prob_matrix(self, epsilon_n: float) -> np.ndarray:
-        """Build normal prob matrix for a specific epsilon_n."""
         assert self.n_distance_matrix is not None, "Call precompute() first"
         return self._build_prob_matrix(self.n_distance_matrix, epsilon_n)
 
     # ------------------------------------------------------------------
-    # Word counting (needed before sanitization to compute epsilon_n)
+    # Word counting
     # ------------------------------------------------------------------
 
-    def count_words(self, doc: SastdpDocument) -> tuple[int, int, int]:
-        """Count sensitive, normal, and OOV words in a document.
-
-        Returns:
-            (ns, nn, n_oov)
-        """
+    def count_words(self, doc: SanitizerDPDocument) -> tuple[int, int, int]:
+        """Count sensitive, normal, and OOV words. Returns (ns, nn, n_oov)."""
         ns = nn = n_oov = 0
         for raw_word in doc.text.split():
             word = raw_word.lower()
@@ -202,7 +162,7 @@ class Sanitizer:
     # Sanitization methods
     # ------------------------------------------------------------------
 
-    def sanitize_santext(self, doc: SastdpDocument) -> SastdpDocumentStatistics:
+    def sanitize_santext(self, doc: SanitizerDPDocument) -> SanitizerDPDocumentStatistics:
         """Baseline: all in-vocab words use the same epsilon over full vocab."""
         assert self.n_prob_matrix_fixed is not None, "Call precompute() first"
         n_prob_matrix = self.n_prob_matrix_fixed
@@ -224,8 +184,9 @@ class Sanitizer:
                 idx = np.random.randint(len(self.vocab))
                 new_doc.append(self.vocab[idx])
 
-        self._write_replacements(doc, " ".join(new_doc), total_epsilon)
-        return SastdpDocumentStatistics(
+        sanitized_text = " ".join(new_doc)
+        self._write_replacements(doc, sanitized_text, total_epsilon)
+        return SanitizerDPDocumentStatistics(
             text_id=doc.text_id,
             sensitive_word_count=0,
             normal_word_count=normal_word_count,
@@ -234,13 +195,9 @@ class Sanitizer:
         )
 
     def sanitize_normal(
-        self, doc: SastdpDocument, epsilon_n: float | None = None
-    ) -> SastdpDocumentStatistics:
-        """Ours: sensitive words use epsilon_s, normal words use epsilon_n.
-
-        If epsilon_n is None, uses config.epsilon (no redistribution).
-        If epsilon_n is provided, builds a per-document normal prob matrix.
-        """
+        self, doc: SanitizerDPDocument, epsilon_n: float | None = None
+    ) -> SanitizerDPDocumentStatistics:
+        """Ours: sensitive words use epsilon_s, normal words use epsilon_n."""
         assert self.s_prob_matrix is not None, "Call precompute() first"
         eps_n = epsilon_n if epsilon_n is not None else self.config.epsilon
         if epsilon_n is None:
@@ -276,8 +233,9 @@ class Sanitizer:
                 idx = np.random.randint(len(self.vocab))
                 new_doc.append(self.vocab[idx])
 
-        self._write_replacements(doc, " ".join(new_doc), total_epsilon)
-        return SastdpDocumentStatistics(
+        sanitized_text = " ".join(new_doc)
+        self._write_replacements(doc, sanitized_text, total_epsilon)
+        return SanitizerDPDocumentStatistics(
             text_id=doc.text_id,
             sensitive_word_count=sensitive_word_count,
             normal_word_count=normal_word_count,
@@ -286,14 +244,9 @@ class Sanitizer:
         )
 
     def sanitize_plus(
-        self, doc: SastdpDocument, epsilon_n: float | None = None
-    ) -> SastdpDocumentStatistics:
-        """Ours+: mixed sampling with coin flip probability p.
-
-        epsilon_n is the *total* LDP budget per normal word (including mixing
-        overhead L).  The mechanism receives epsilon_n - L.
-        If epsilon_n is None, uses config.epsilon (no redistribution).
-        """
+        self, doc: SanitizerDPDocument, epsilon_n: float | None = None
+    ) -> SanitizerDPDocumentStatistics:
+        """Ours+: mixed sampling with coin flip probability p."""
         assert self.s_prob_matrix is not None, "Call precompute() first"
         eps_n = epsilon_n if epsilon_n is not None else self.config.epsilon
         L = self.mixing_overhead
@@ -324,13 +277,11 @@ class Sanitizer:
                 if word in self.sword2id:
                     sensitive_word_count += 1
                     if flip <= p:
-                        # Within-class: sensitive -> sensitive
                         sampling_prob = self.s_prob_matrix[index]
                         idx = np.random.choice(len(sampling_prob), p=sampling_prob)
                         new_doc.append(self.id2sword[idx])
                         total_epsilon += self.config.s_epsilon
                     else:
-                        # Cross-class: sensitive -> normal
                         sampling_prob = n_prob_matrix[index]
                         idx = np.random.choice(len(sampling_prob), p=sampling_prob)
                         new_doc.append(self.id2nword[idx])
@@ -338,13 +289,11 @@ class Sanitizer:
                 else:
                     normal_word_count += 1
                     if flip <= p:
-                        # Within-class: normal -> normal
                         sampling_prob = n_prob_matrix[index]
                         idx = np.random.choice(len(sampling_prob), p=sampling_prob)
                         new_doc.append(self.id2nword[idx])
                         total_epsilon += eps_n
                     else:
-                        # Cross-class: normal -> sensitive
                         sampling_prob = self.s_prob_matrix[index]
                         idx = np.random.choice(len(sampling_prob), p=sampling_prob)
                         new_doc.append(self.id2sword[idx])
@@ -354,8 +303,9 @@ class Sanitizer:
                 idx = np.random.randint(len(self.vocab))
                 new_doc.append(self.vocab[idx])
 
-        self._write_replacements(doc, " ".join(new_doc), total_epsilon)
-        return SastdpDocumentStatistics(
+        sanitized_text = " ".join(new_doc)
+        self._write_replacements(doc, sanitized_text, total_epsilon)
+        return SanitizerDPDocumentStatistics(
             text_id=doc.text_id,
             sensitive_word_count=sensitive_word_count,
             normal_word_count=normal_word_count,
@@ -368,7 +318,7 @@ class Sanitizer:
     # ------------------------------------------------------------------
 
     def _write_replacements(
-        self, doc: SastdpDocument, sanitized_text: str, total_epsilon: float
+        self, doc: SanitizerDPDocument, sanitized_text: str, total_epsilon: float
     ):
         replacements = {
             "text_id": doc.text_id,
@@ -388,61 +338,46 @@ class Sanitizer:
 # Per-document epsilon redistribution
 # ----------------------------------------------------------------------
 
-
 def compute_per_doc_epsilon(
-    docs: list[SastdpDocument],
-    sanitizer: "Sanitizer",
-) -> dict:
+    docs: list[SanitizerDPDocument],
+    sanitizer: Sanitizer,
+) -> list:
     """Compute per-document redistributed epsilon_n.
 
     SanText spends epsilon per in-vocab word, so for document i:
         epsilon_t[i] = epsilon * (ns[i] + nn[i])
-
-    Redistributing the budget saved on sensitive words:
         epsilon_n[i] = (epsilon_t[i] - ns[i] * epsilon_s) / nn[i]
-                     = (epsilon * (ns + nn) - ns * epsilon_s) / nn
-
-    Args:
-        docs: documents to compute redistribution for.
-        sanitizer: a Sanitizer (provides config.epsilon, config.s_epsilon
-            and word counting via count_words).
-
-    Returns:
-        dict mapping text_id -> epsilon_n (or None if nn == 0).
     """
     import logging
     _logger = logging.getLogger(__name__)
 
     epsilon = sanitizer.config.epsilon
     epsilon_s = sanitizer.config.s_epsilon
-    result: dict = {}
+    result = []
 
     for doc in docs:
         ns, nn, _ = sanitizer.count_words(doc)
-
         if nn == 0:
-            result[doc.text_id] = None
+            result.append(None)
             continue
 
-        # SanText would spend epsilon per in-vocab word
         epsilon_t = epsilon * (ns + nn)
         epsilon_n = (epsilon_t - ns * epsilon_s) / nn
 
         if epsilon_n <= 0:
             _logger.warning(
-                "Document %s: epsilon_n=%.4f <= 0 (ns=%d, nn=%d). "
-                "Clamping to 0.01.",
+                "Document %s: epsilon_n=%.4f <= 0 (ns=%d, nn=%d). Clamping to 0.01.",
                 doc.text_id, epsilon_n, ns, nn,
             )
             epsilon_n = 0.01
 
-        result[doc.text_id] = epsilon_n
+        result.append(epsilon_n)
 
     return result
 
 
 # ----------------------------------------------------------------------
-# Multiprocessing support: one module-level Sanitizer per worker
+# Multiprocessing support
 # ----------------------------------------------------------------------
 
 _sanitizer: Sanitizer | None = None
@@ -454,23 +389,33 @@ def init_worker(sanitizer: Sanitizer):
     _sanitizer = sanitizer
 
 
-def worker_sanitize_santext(doc: SastdpDocument) -> SastdpDocumentStatistics:
-    assert _sanitizer is not None
-    return _sanitizer.sanitize_santext(doc)
-
-
-def worker_sanitize(args: tuple[SastdpDocument, float | None]) -> SastdpDocumentStatistics:
-    """Worker function. Dispatches to the correct method based on config.
-
-    For santext, epsilon_n is ignored (all words use the same epsilon).
-    For normal/plus, epsilon_n is the per-document redistributed budget.
-    """
+def worker_sanitize(args: tuple) -> SanitizerDPDocumentStatistics:
+    """Worker function. Dispatches to the correct method based on config."""
     assert _sanitizer is not None
     doc, epsilon_n = args
-    if _sanitizer.config.method == SastdpMethod.SANTEXT:
+    if _sanitizer.config.method == SanitizerDPMethod.SANTEXT:
         return _sanitizer.sanitize_santext(doc)
-    elif _sanitizer.config.method == SastdpMethod.NORMAL:
+    elif _sanitizer.config.method == SanitizerDPMethod.NORMAL:
         return _sanitizer.sanitize_normal(doc, epsilon_n=epsilon_n)
-    elif _sanitizer.config.method == SastdpMethod.PLUS:
+    elif _sanitizer.config.method == SanitizerDPMethod.PLUS:
         return _sanitizer.sanitize_plus(doc, epsilon_n=epsilon_n)
     raise ValueError(f"Unsupported method: {_sanitizer.config.method}")
+
+
+def sanitize_corpus(docs, sanitizer, per_doc_epsilons, threads=4, desc="Sanitizing"):
+    """Sanitize documents in parallel. Returns list of SanitizerDPDocumentStatistics."""
+    from multiprocessing import Pool, cpu_count
+    from tqdm import tqdm
+
+    work_items = list(zip(docs, per_doc_epsilons))
+    threads = min(threads, cpu_count())
+
+    if threads <= 1:
+        init_worker(sanitizer)
+        return [worker_sanitize(item) for item in tqdm(work_items, desc=desc)]
+
+    with Pool(threads, initializer=init_worker, initargs=(sanitizer,)) as pool:
+        return list(tqdm(
+            pool.imap(worker_sanitize, work_items, chunksize=32),
+            total=len(docs), desc=desc,
+        ))

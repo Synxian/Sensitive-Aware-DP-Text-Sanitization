@@ -4,6 +4,7 @@ import torch
 from typing import List, Dict
 from tqdm import tqdm
 
+
 def compute_bert_score(
     original: List[str],
     sanitized: List[str],
@@ -18,7 +19,6 @@ def compute_bert_score(
     }
 
     model_name = MODEL_BY_LANG.get(lang, "roberta-large")
-    max_tokens = 450        # safe margin below 512
     batch_size = 16
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -38,12 +38,11 @@ def compute_bert_score(
     for orig_doc, san_doc in tqdm(
         zip(original, sanitized),
         total=len(original),
-        desc="Documents",
+        desc="BERTScore",
     ):
         orig_chunks = chunk_text(orig_doc, max_words=300)
         san_chunks = chunk_text(san_doc, max_words=300)
 
-        # keep aligned chunk pairs
         n = min(len(orig_chunks), len(san_chunks))
         orig_chunks = orig_chunks[:n]
         san_chunks = san_chunks[:n]
@@ -61,7 +60,6 @@ def compute_bert_score(
                     verbose=False
                 )
 
-            # ✅ word-based weights (consistent with chunking)
             weights = [len(t.split()) for t in o_batch]
 
             all_precisions.extend(P.tolist())
@@ -69,7 +67,6 @@ def compute_bert_score(
             all_f1s.extend(F1.tolist())
             all_weights.extend(weights)
 
-    # weighted aggregation
     w = torch.tensor(all_weights, dtype=torch.float)
     precision = torch.sum(torch.tensor(all_precisions) * w) / torch.sum(w)
     recall = torch.sum(torch.tensor(all_recalls) * w) / torch.sum(w)

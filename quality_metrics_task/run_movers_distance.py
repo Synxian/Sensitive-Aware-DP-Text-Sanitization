@@ -1,6 +1,5 @@
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from scipy.stats import wasserstein_distance
 
 
 def compute_movers_distance(originales, sanitizados, device):
@@ -21,9 +20,6 @@ def compute_movers_distance(originales, sanitizados, device):
         show_progress_bar=True,
     )
 
-    dists = np.linalg.norm(
-        emb_orig - emb_san,
-        axis=1
-    )
+    dists = np.linalg.norm(emb_orig - emb_san, axis=1)
 
     return float(np.mean(dists))
