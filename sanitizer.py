@@ -21,7 +21,7 @@ import os
 import json
 import numpy as np
 from scipy.special import softmax
-from sklearn.metrics.pairwise import cosine_distances
+from sklearn.metrics.pairwise import cosine_distances, euclidean_distances
 from dataclasses import dataclass, field
 
 from pydantic_models.satsdp import (
@@ -39,6 +39,10 @@ class SanitizerConfig:
     p: float = 0.7
     method: SastdpMethod = SastdpMethod.NORMAL
     replacements_output_dir: str = "replacements"
+    # "cosine" (current default — bounded sensitivity, DP-correct) or
+    # "euclidean" (matches the original santext_sample.py reference,
+    # not DP-correct without dividing by d_max but useful for parity tests).
+    distance: str = "cosine"
 
 
 @dataclass
@@ -104,25 +108,32 @@ class Sanitizer:
         self.id2sword = {v: k for k, v in self.sword2id.items()}
         self.id2nword = {v: k for k, v in self.nword2id.items()}
 
+        if self.config.distance == "cosine":
+            distance_fn = cosine_distances
+        elif self.config.distance == "euclidean":
+            distance_fn = euclidean_distances
+        else:
+            raise ValueError(f"Unknown distance: {self.config.distance!r}. Expected 'cosine' or 'euclidean'.")
+
         if self.config.method == SastdpMethod.NORMAL:
             # s_dist: |V_s| x |V_all|, n_dist: |V_n| x |V_all|
-            self.s_distance_matrix = cosine_distances(
+            self.s_distance_matrix = distance_fn(
                 embeddings.sensitive_word_embed, embeddings.all_word_embed
             )
-            self.n_distance_matrix = cosine_distances(
+            self.n_distance_matrix = distance_fn(
                 embeddings.normal_word_embed, embeddings.all_word_embed
             )
         elif self.config.method == SastdpMethod.PLUS:
             # s_dist: |V_all| x |V_s|, n_dist: |V_all| x |V_n|
-            self.s_distance_matrix = cosine_distances(
+            self.s_distance_matrix = distance_fn(
                 embeddings.all_word_embed, embeddings.sensitive_word_embed
             )
-            self.n_distance_matrix = cosine_distances(
+            self.n_distance_matrix = distance_fn(
                 embeddings.all_word_embed, embeddings.normal_word_embed
             )
         elif self.config.method == SastdpMethod.SANTEXT:
             # Single square matrix
-            self.n_distance_matrix = cosine_distances(
+            self.n_distance_matrix = distance_fn(
                 embeddings.all_word_embed, embeddings.all_word_embed
             )
 
