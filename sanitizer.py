@@ -32,6 +32,13 @@ from pydantic_models.satsdp import (
 )
 
 
+def _l2_normalize(emb: np.ndarray) -> np.ndarray:
+    """Row-wise L2 normalize an embedding matrix; rows of all-zero stay zero."""
+    norms = np.linalg.norm(emb, axis=1, keepdims=True)
+    norms = np.where(norms == 0.0, 1.0, norms)
+    return emb / norms
+
+
 @dataclass
 class SanitizerConfig:
     epsilon: float
@@ -110,32 +117,34 @@ class Sanitizer:
 
         if self.config.distance == "cosine":
             distance_fn = cosine_distances
+            sensitive_embed = embeddings.sensitive_word_embed
+            normal_embed = embeddings.normal_word_embed
+            all_embed = embeddings.all_word_embed
         elif self.config.distance == "euclidean":
             distance_fn = euclidean_distances
+            # L2-normalize before computing Euclidean so the metric diameter is
+            # a public constant (= 2) instead of a data-dependent d_max. Without
+            # this the exponential mechanism is only DP under metric LDP /
+            # d_X-privacy; with this it satisfies standard ε-LDP cleanly.
+            # (sklearn's cosine_distances already normalizes internally, so
+            # the cosine branch doesn't need this step.)
+            sensitive_embed = _l2_normalize(embeddings.sensitive_word_embed)
+            normal_embed = _l2_normalize(embeddings.normal_word_embed)
+            all_embed = _l2_normalize(embeddings.all_word_embed)
         else:
             raise ValueError(f"Unknown distance: {self.config.distance!r}. Expected 'cosine' or 'euclidean'.")
 
         if self.config.method == SastdpMethod.NORMAL:
             # s_dist: |V_s| x |V_all|, n_dist: |V_n| x |V_all|
-            self.s_distance_matrix = distance_fn(
-                embeddings.sensitive_word_embed, embeddings.all_word_embed
-            )
-            self.n_distance_matrix = distance_fn(
-                embeddings.normal_word_embed, embeddings.all_word_embed
-            )
+            self.s_distance_matrix = distance_fn(sensitive_embed, all_embed)
+            self.n_distance_matrix = distance_fn(normal_embed, all_embed)
         elif self.config.method == SastdpMethod.PLUS:
             # s_dist: |V_all| x |V_s|, n_dist: |V_all| x |V_n|
-            self.s_distance_matrix = distance_fn(
-                embeddings.all_word_embed, embeddings.sensitive_word_embed
-            )
-            self.n_distance_matrix = distance_fn(
-                embeddings.all_word_embed, embeddings.normal_word_embed
-            )
+            self.s_distance_matrix = distance_fn(all_embed, sensitive_embed)
+            self.n_distance_matrix = distance_fn(all_embed, normal_embed)
         elif self.config.method == SastdpMethod.SANTEXT:
             # Single square matrix
-            self.n_distance_matrix = distance_fn(
-                embeddings.all_word_embed, embeddings.all_word_embed
-            )
+            self.n_distance_matrix = distance_fn(all_embed, all_embed)
 
         # Cosine distance is in [0, 1] for non-negative vectors, [0, 2] general.
         # Sensitivity is fixed and public, no need to compute from data.
