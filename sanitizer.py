@@ -140,9 +140,7 @@ class Sanitizer:
             # Single square matrix
             self.n_distance_matrix = distance_fn(all_embed, all_embed)
 
-        # Cosine distance is in [0, 1] for non-negative vectors, [0, 2] general.
-        # Sensitivity is fixed and public, no need to compute from data.
-        self.sensitivity = 1.0
+        self.sensitivity = 2.0 if self.config.distance == "euclidean" else 1.0
 
         # Sensitive prob matrix uses fixed epsilon_s (same for every document).
         # For Plus, subtract the mixing overhead L so that the total LDP cost
