@@ -70,6 +70,8 @@ def parse_args():
                    help="Fallback: fraction of vocab treated as sensitive (--no_ner only)")
     p.add_argument("--sensitive_words_path", default=None,
                    help="Fallback: JSON file {word: ...} with sensitive words (--no_ner only)")
+    p.add_argument("--sensitive_words_dir", default="./output/sensitive_words",
+                   help="Directory to save/load sensitive words cache")
     p.add_argument("--max_samples", type=int, default=None)
     p.add_argument("--seed",    type=int, default=42)
     p.add_argument("--threads", type=int, default=4)
@@ -109,7 +111,7 @@ def main():
         glove_path=args.embed_path,
         task=args.task,
         seed=args.seed,
-        output_dir=os.path.join(os.path.dirname(args.output_dir), "sensitive_words"),
+        output_dir=args.sensitive_words_dir,
     )
     logger.info("Sensitive words: %d", len(sensitive))
 

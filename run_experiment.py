@@ -33,6 +33,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 
 logger    = logging.getLogger(__name__)
 ROOT      = os.path.dirname(os.path.abspath(__file__))
@@ -63,8 +64,17 @@ def build_configs(args):
             for eps in args.epsilons:
                 p_list = args.p_values if method == "plus" else [0.0]
                 for p in p_list:
+                    # if s_epsilon is not given, it will be eps/2 by default
+                    s_eps_str = args.s_epsilon.replace(" ", "")
+                    if s_eps_str.startswith("*"):
+                        s_eps_val = eps * float(s_eps_str[1:])
+                    elif s_eps_str.startswith("/"):
+                        s_eps_val = eps / float(s_eps_str[1:])
+                    else:
+                        s_eps_val = float(s_eps_str)
                     configs.append(dict(task=task, method=method,
-                                        epsilon=eps, s_epsilon=eps / 2, p=p))
+                                        epsilon=eps, s_epsilon=s_eps_val, p=p))
+
     return configs
 
 
@@ -83,6 +93,7 @@ def main():
     p.add_argument("--methods",  nargs="+", default=["santext", "normal", "plus"],
                    choices=["santext", "normal", "plus"])
     p.add_argument("--epsilons", nargs="+", type=float, default=[1, 2, 4, 8])
+    p.add_argument("--s_epsilon", type=str, default='*0.5', help="E.g. '*0.5', '/2', or '1.5'")
     p.add_argument("--distance_metric", default="cosine", choices=["cosine", "euclidean"])
     p.add_argument("--p_values", nargs="+", type=float, default=[0.7])
     p.add_argument("--no_ner", action="store_true",
@@ -105,6 +116,11 @@ def main():
     p.add_argument("--seed",    type=int, default=42)
     p.add_argument("--threads", type=int, default=4)
     args = p.parse_args()
+
+    # Save original base for sensitive words
+    original_output_base = args.output_base
+    current_time = time.strftime("%Y%m%d_%H%M%S")
+    args.output_base = os.path.join(args.output_base, f"{current_time}_run")
 
     logging.basicConfig(format="%(asctime)s %(message)s",
                         datefmt="%H:%M:%S", level=logging.INFO)
@@ -143,6 +159,7 @@ def main():
                        "--output_dir",  san_dir,
                        "--seed",        str(args.seed),
                        "--threads",     str(args.threads),
+                       "--sensitive_words_dir", os.path.join(original_output_base, "sensitive_words"),
                        ]
                 if args.no_ner:
                     cmd += ["--no_ner", "--sensitive_pct", str(args.sensitive_pct)]

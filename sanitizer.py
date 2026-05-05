@@ -101,9 +101,9 @@ class Sanitizer:
             if not self.sword2id or not self.nword2id:
                 raise ValueError("method='plus' requires non-empty sensitive and normal vocabularies.")
 
-        if self.config.distance == "cosine":
+        if self.config.distance_metric == "cosine":
             distance_fn = cosine_distances
-        elif self.config.distance == "euclidean":
+        elif self.config.distance_metric == "euclidean":
             distance_fn = euclidean_distances
         else:
             raise ValueError(f"Unknown distance: {self.config.distance!r}. Expected 'cosine' or 'euclidean'.")
