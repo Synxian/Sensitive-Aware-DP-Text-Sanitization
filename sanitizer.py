@@ -122,12 +122,6 @@ class Sanitizer:
             all_embed = embeddings.all_word_embed
         elif self.config.distance == "euclidean":
             distance_fn = euclidean_distances
-            # L2-normalize before computing Euclidean so the metric diameter is
-            # a public constant (= 2) instead of a data-dependent d_max. Without
-            # this the exponential mechanism is only DP under metric LDP /
-            # d_X-privacy; with this it satisfies standard ε-LDP cleanly.
-            # (sklearn's cosine_distances already normalizes internally, so
-            # the cosine branch doesn't need this step.)
             sensitive_embed = _l2_normalize(embeddings.sensitive_word_embed)
             normal_embed = _l2_normalize(embeddings.normal_word_embed)
             all_embed = _l2_normalize(embeddings.all_word_embed)
@@ -160,9 +154,7 @@ class Sanitizer:
                 f"s_epsilon ({self.config.s_epsilon}) must exceed mixing overhead "
                 f"L={L:.4f} for method=plus with p={self.config.p}"
             )
-            self.s_prob_matrix = self._build_prob_matrix(
-                self.s_distance_matrix, s_mech_eps
-            )
+            self.s_prob_matrix = self._build_prob_matrix(self.s_distance_matrix, s_mech_eps)
 
         # Santext never varies epsilon per document, so build the normal
         # prob matrix once here. For normal/plus the fixed matrix is built
@@ -242,9 +234,7 @@ class Sanitizer:
             total_epsilon=total_epsilon,
         )
 
-    def sanitize_normal(
-        self, doc: SastdpDocument, epsilon_n: float | None = None
-    ) -> SastdpDocumentStatistics:
+    def sanitize_normal(self, doc: SastdpDocument, epsilon_n: float | None = None) -> SastdpDocumentStatistics:
         """Ours: sensitive words use epsilon_s, normal words use epsilon_n.
 
         If epsilon_n is None, uses config.epsilon (no redistribution).
@@ -294,9 +284,7 @@ class Sanitizer:
             total_epsilon=total_epsilon,
         )
 
-    def sanitize_plus(
-        self, doc: SastdpDocument, epsilon_n: float | None = None
-    ) -> SastdpDocumentStatistics:
+    def sanitize_plus(self, doc: SastdpDocument, epsilon_n: float | None = None) -> SastdpDocumentStatistics:
         """Ours+: mixed sampling with coin flip probability p.
 
         epsilon_n is the *total* LDP budget per normal word (including mixing
@@ -308,8 +296,7 @@ class Sanitizer:
         L = self.mixing_overhead
         eps_n_mech = eps_n - L
         assert eps_n_mech > 0, (
-            f"epsilon_n ({eps_n}) must exceed mixing overhead "
-            f"L={L:.4f} for method=plus with p={self.config.p}"
+            f"epsilon_n ({eps_n}) must exceed mixing overhead L={L:.4f} for method=plus with p={self.config.p}"
         )
         if epsilon_n is None:
             if self.n_prob_matrix_fixed is None:
@@ -376,18 +363,14 @@ class Sanitizer:
     # I/O
     # ------------------------------------------------------------------
 
-    def _write_replacements(
-        self, doc: SastdpDocument, sanitized_text: str, total_epsilon: float
-    ):
+    def _write_replacements(self, doc: SastdpDocument, sanitized_text: str, total_epsilon: float):
         replacements = {
             "text_id": doc.text_id,
             "original_text": doc.text,
             "sanitized_text": sanitized_text,
             "total_epsilon": total_epsilon,
         }
-        path = os.path.join(
-            self.config.replacements_output_dir, f"{doc.text_id}.json"
-        )
+        path = os.path.join(self.config.replacements_output_dir, f"{doc.text_id}.json")
         os.makedirs(self.config.replacements_output_dir, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(replacements, f, ensure_ascii=False, indent=4)
@@ -420,6 +403,7 @@ def compute_per_doc_epsilon(
         dict mapping text_id -> epsilon_n (or None if nn == 0).
     """
     import logging
+
     _logger = logging.getLogger(__name__)
 
     epsilon = sanitizer.config.epsilon
@@ -439,9 +423,11 @@ def compute_per_doc_epsilon(
 
         if epsilon_n <= 0:
             _logger.warning(
-                "Document %s: epsilon_n=%.4f <= 0 (ns=%d, nn=%d). "
-                "Clamping to 0.01.",
-                doc.text_id, epsilon_n, ns, nn,
+                "Document %s: epsilon_n=%.4f <= 0 (ns=%d, nn=%d). Clamping to 0.01.",
+                doc.text_id,
+                epsilon_n,
+                ns,
+                nn,
             )
             epsilon_n = 0.01
 
