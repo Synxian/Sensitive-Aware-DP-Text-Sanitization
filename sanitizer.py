@@ -32,6 +32,13 @@ from pydantic_models.satsdp import (
 )
 
 
+def _l2_normalize(emb: np.ndarray) -> np.ndarray:
+    """Row-wise L2 normalize an embedding matrix; rows of all-zero stay zero."""
+    norms = np.linalg.norm(emb, axis=1, keepdims=True)
+    norms = np.where(norms == 0.0, 1.0, norms)
+    return emb / norms
+
+
 @dataclass
 class SanitizerConfig:
     epsilon: float
@@ -110,36 +117,30 @@ class Sanitizer:
 
         if self.config.distance == "cosine":
             distance_fn = cosine_distances
+            sensitive_embed = embeddings.sensitive_word_embed
+            normal_embed = embeddings.normal_word_embed
+            all_embed = embeddings.all_word_embed
         elif self.config.distance == "euclidean":
             distance_fn = euclidean_distances
+            sensitive_embed = _l2_normalize(embeddings.sensitive_word_embed)
+            normal_embed = _l2_normalize(embeddings.normal_word_embed)
+            all_embed = _l2_normalize(embeddings.all_word_embed)
         else:
             raise ValueError(f"Unknown distance: {self.config.distance!r}. Expected 'cosine' or 'euclidean'.")
 
         if self.config.method == SastdpMethod.NORMAL:
             # s_dist: |V_s| x |V_all|, n_dist: |V_n| x |V_all|
-            self.s_distance_matrix = distance_fn(
-                embeddings.sensitive_word_embed, embeddings.all_word_embed
-            )
-            self.n_distance_matrix = distance_fn(
-                embeddings.normal_word_embed, embeddings.all_word_embed
-            )
+            self.s_distance_matrix = distance_fn(sensitive_embed, all_embed)
+            self.n_distance_matrix = distance_fn(normal_embed, all_embed)
         elif self.config.method == SastdpMethod.PLUS:
             # s_dist: |V_all| x |V_s|, n_dist: |V_all| x |V_n|
-            self.s_distance_matrix = distance_fn(
-                embeddings.all_word_embed, embeddings.sensitive_word_embed
-            )
-            self.n_distance_matrix = distance_fn(
-                embeddings.all_word_embed, embeddings.normal_word_embed
-            )
+            self.s_distance_matrix = distance_fn(all_embed, sensitive_embed)
+            self.n_distance_matrix = distance_fn(all_embed, normal_embed)
         elif self.config.method == SastdpMethod.SANTEXT:
             # Single square matrix
-            self.n_distance_matrix = distance_fn(
-                embeddings.all_word_embed, embeddings.all_word_embed
-            )
+            self.n_distance_matrix = distance_fn(all_embed, all_embed)
 
-        # Cosine distance is in [0, 1] for non-negative vectors, [0, 2] general.
-        # Sensitivity is fixed and public, no need to compute from data.
-        self.sensitivity = 1.0
+        self.sensitivity = 2.0 if self.config.distance == "euclidean" else 1.0
 
         # Sensitive prob matrix uses fixed epsilon_s (same for every document).
         # For Plus, subtract the mixing overhead L so that the total LDP cost
@@ -151,9 +152,7 @@ class Sanitizer:
                 f"s_epsilon ({self.config.s_epsilon}) must exceed mixing overhead "
                 f"L={L:.4f} for method=plus with p={self.config.p}"
             )
-            self.s_prob_matrix = self._build_prob_matrix(
-                self.s_distance_matrix, s_mech_eps
-            )
+            self.s_prob_matrix = self._build_prob_matrix(self.s_distance_matrix, s_mech_eps)
 
         # Santext never varies epsilon per document, so build the normal
         # prob matrix once here. For normal/plus the fixed matrix is built
@@ -233,9 +232,7 @@ class Sanitizer:
             total_epsilon=total_epsilon,
         )
 
-    def sanitize_normal(
-        self, doc: SastdpDocument, epsilon_n: float | None = None
-    ) -> SastdpDocumentStatistics:
+    def sanitize_normal(self, doc: SastdpDocument, epsilon_n: float | None = None) -> SastdpDocumentStatistics:
         """Ours: sensitive words use epsilon_s, normal words use epsilon_n.
 
         If epsilon_n is None, uses config.epsilon (no redistribution).
@@ -285,9 +282,7 @@ class Sanitizer:
             total_epsilon=total_epsilon,
         )
 
-    def sanitize_plus(
-        self, doc: SastdpDocument, epsilon_n: float | None = None
-    ) -> SastdpDocumentStatistics:
+    def sanitize_plus(self, doc: SastdpDocument, epsilon_n: float | None = None) -> SastdpDocumentStatistics:
         """Ours+: mixed sampling with coin flip probability p.
 
         epsilon_n is the *total* LDP budget per normal word (including mixing
@@ -299,8 +294,7 @@ class Sanitizer:
         L = self.mixing_overhead
         eps_n_mech = eps_n - L
         assert eps_n_mech > 0, (
-            f"epsilon_n ({eps_n}) must exceed mixing overhead "
-            f"L={L:.4f} for method=plus with p={self.config.p}"
+            f"epsilon_n ({eps_n}) must exceed mixing overhead L={L:.4f} for method=plus with p={self.config.p}"
         )
         if epsilon_n is None:
             if self.n_prob_matrix_fixed is None:
@@ -367,18 +361,14 @@ class Sanitizer:
     # I/O
     # ------------------------------------------------------------------
 
-    def _write_replacements(
-        self, doc: SastdpDocument, sanitized_text: str, total_epsilon: float
-    ):
+    def _write_replacements(self, doc: SastdpDocument, sanitized_text: str, total_epsilon: float):
         replacements = {
             "text_id": doc.text_id,
             "original_text": doc.text,
             "sanitized_text": sanitized_text,
             "total_epsilon": total_epsilon,
         }
-        path = os.path.join(
-            self.config.replacements_output_dir, f"{doc.text_id}.json"
-        )
+        path = os.path.join(self.config.replacements_output_dir, f"{doc.text_id}.json")
         os.makedirs(self.config.replacements_output_dir, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(replacements, f, ensure_ascii=False, indent=4)
@@ -411,6 +401,7 @@ def compute_per_doc_epsilon(
         dict mapping text_id -> epsilon_n (or None if nn == 0).
     """
     import logging
+
     _logger = logging.getLogger(__name__)
 
     epsilon = sanitizer.config.epsilon
@@ -430,9 +421,11 @@ def compute_per_doc_epsilon(
 
         if epsilon_n <= 0:
             _logger.warning(
-                "Document %s: epsilon_n=%.4f <= 0 (ns=%d, nn=%d). "
-                "Clamping to 0.01.",
-                doc.text_id, epsilon_n, ns, nn,
+                "Document %s: epsilon_n=%.4f <= 0 (ns=%d, nn=%d). Clamping to 0.01.",
+                doc.text_id,
+                epsilon_n,
+                ns,
+                nn,
             )
             epsilon_n = 0.01
 
