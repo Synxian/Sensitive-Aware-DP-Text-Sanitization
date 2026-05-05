@@ -159,7 +159,8 @@ def main():
             else:
                 cmd = [sys.executable, TRAIN,
                        "--task",       cfg["task"],
-                       "--data_dir",   san_dir,
+                       "--train_dir",   san_dir,
+                       "--test_dir", data_dir,
                        "--output_dir", san_dir,
                        "--num_epochs", str(args.num_epochs),
                        "--batch_size", str(args.batch_size),

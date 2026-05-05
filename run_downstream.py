@@ -4,7 +4,8 @@ Usage
 -----
     python run_downstream.py \\
         --task sst2 \\
-        --data_dir  ./output/sst2/normal/eps_10.00_seps_5.00 \\
+        --train_dir  ./output/sst2/normal/eps_10.00_seps_5.00 \\
+        --test_dir   ./data/SST-2/original \\
         --output_dir ./output/sst2/normal/eps_10.00_seps_5.00
 """
 import argparse
@@ -114,7 +115,8 @@ def evaluate(model, loader, device):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--task",       required=True, choices=["sst2", "qnli"])
-    p.add_argument("--data_dir",   required=True)
+    p.add_argument("--train_dir",   required=True)
+    p.add_argument("--test_dir",  required=True) 
     p.add_argument("--output_dir", required=True)
     p.add_argument("--model_name", default="bert-base-uncased")
     p.add_argument("--num_epochs", type=int,   default=3)
@@ -143,10 +145,10 @@ def main():
     model     = AutoModelForSequenceClassification.from_pretrained(
         args.model_name, config=config, local_files_only=True).to(device)
 
-    train_ds = GlueTSVDataset(os.path.join(args.data_dir, "train.tsv"),
+    train_ds = GlueTSVDataset(os.path.join(args.train_dir, "train.tsv"),
                               args.task, tokenizer, args.max_length,
                               args.max_train_samples)
-    eval_ds  = GlueTSVDataset(os.path.join(args.data_dir, "dev.tsv"),
+    eval_ds  = GlueTSVDataset(os.path.join(args.test_dir, "dev.tsv"),
                               args.task, tokenizer, args.max_length,
                               args.max_eval_samples)
     logger.info("Train: %d  Eval: %d  Device: %s", len(train_ds), len(eval_ds), device)

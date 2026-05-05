@@ -101,21 +101,35 @@ class Sanitizer:
             if not self.sword2id or not self.nword2id:
                 raise ValueError("method='plus' requires non-empty sensitive and normal vocabularies.")
 
-        metric_fn = cosine_distances if self.config.distance_metric == "cosine" else euclidean_distances
+        if self.config.distance == "cosine":
+            distance_fn = cosine_distances
+        elif self.config.distance == "euclidean":
+            distance_fn = euclidean_distances
+        else:
+            raise ValueError(f"Unknown distance: {self.config.distance!r}. Expected 'cosine' or 'euclidean'.")
+
 
         if self.config.method == SanitizerDPMethod.NORMAL:
-            self.s_distance_matrix = metric_fn(
-                embeddings.sensitive_word_embed, embeddings.all_word_embed)
-            self.n_distance_matrix = metric_fn(
-                embeddings.normal_word_embed, embeddings.all_word_embed)
+             # s_dist: |V_s| x |V_all|, n_dist: |V_n| x |V_all|
+            self.s_distance_matrix = distance_fn(
+                embeddings.sensitive_word_embed, embeddings.all_word_embed
+            )
+            self.n_distance_matrix = distance_fn(
+                embeddings.normal_word_embed, embeddings.all_word_embed
+            )
         elif self.config.method == SanitizerDPMethod.PLUS:
-            self.s_distance_matrix = metric_fn(
-                embeddings.all_word_embed, embeddings.sensitive_word_embed)
-            self.n_distance_matrix = metric_fn(
-                embeddings.all_word_embed, embeddings.normal_word_embed)
+            # s_dist: |V_all| x |V_s|, n_dist: |V_all| x |V_n|
+            self.s_distance_matrix = distance_fn(
+                embeddings.all_word_embed, embeddings.sensitive_word_embed
+            )
+            self.n_distance_matrix = distance_fn(
+                embeddings.all_word_embed, embeddings.normal_word_embed
+            )
         elif self.config.method == SanitizerDPMethod.SANTEXT:
-            self.n_distance_matrix = metric_fn(
-                embeddings.all_word_embed, embeddings.all_word_embed)
+             # Single square matrix
+            self.n_distance_matrix = distance_fn(
+                embeddings.all_word_embed, embeddings.all_word_embed
+            )
 
         self.sensitivity = 1.0
 
