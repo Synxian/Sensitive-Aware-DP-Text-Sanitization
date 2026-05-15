@@ -72,6 +72,8 @@ def build_flair_mapping(model_path, dataset, dataset_path, threshold, text_col, 
         sentence = Sentence(sample.lower())
         tagger.predict(sentence, return_probabilities_for_all_classes=True)
         for word in sentence:
+            if len(word.text) < 3:
+                continue
             candidates = list(filter(filter_tags, word.tags_proba_dist["ner"]))
             if len(candidates) > 0:
                 if mapping.get(word.text):
