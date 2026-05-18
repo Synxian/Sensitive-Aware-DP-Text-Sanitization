@@ -4,8 +4,7 @@ Usage
 -----
     python run_downstream.py \\
         --task sst2 \\
-        --train_dir  ./output/sst2/normal/eps_10.00_seps_5.00 \\
-        --test_dir   ./data/SST-2/original \\
+        --data_dir  ./output/sst2/normal/eps_10.00_seps_5.00 \\
         --output_dir ./output/sst2/normal/eps_10.00_seps_5.00
 """
 import argparse
@@ -115,8 +114,7 @@ def evaluate(model, loader, device):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--task",       required=True, choices=["sst2", "qnli"])
-    p.add_argument("--train_dir",   required=True)
-    p.add_argument("--test_dir",  required=True) 
+    p.add_argument("--data_dir",   required=True)
     p.add_argument("--output_dir", required=True)
     p.add_argument("--model_name", default="bert-base-uncased")
     p.add_argument("--num_epochs", type=int,   default=3)
@@ -132,23 +130,23 @@ def parse_args():
 def main():
     args = parse_args()
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
-    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    # Models are pre-downloaded by setup_and_run.sh; allow online fallback.
     logging.basicConfig(format="%(asctime)s %(message)s",
                         datefmt="%H:%M:%S", level=logging.INFO)
     os.makedirs(args.output_dir, exist_ok=True)
 
     device    = _device()
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, local_files_only=False)
     config    = AutoConfig.from_pretrained(
         args.model_name, num_labels=TASK_META[args.task]["num_labels"],
-        local_files_only=True)
+        local_files_only=False)
     model     = AutoModelForSequenceClassification.from_pretrained(
-        args.model_name, config=config, local_files_only=True).to(device)
+        args.model_name, config=config, local_files_only=False).to(device)
 
-    train_ds = GlueTSVDataset(os.path.join(args.train_dir, "train.tsv"),
+    train_ds = GlueTSVDataset(os.path.join(args.data_dir, "train.tsv"),
                               args.task, tokenizer, args.max_length,
                               args.max_train_samples)
-    eval_ds  = GlueTSVDataset(os.path.join(args.test_dir, "dev.tsv"),
+    eval_ds  = GlueTSVDataset(os.path.join(args.data_dir, "dev.tsv"),
                               args.task, tokenizer, args.max_length,
                               args.max_eval_samples)
     logger.info("Train: %d  Eval: %d  Device: %s", len(train_ds), len(eval_ds), device)

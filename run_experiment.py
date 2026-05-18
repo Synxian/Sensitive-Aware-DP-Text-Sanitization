@@ -33,7 +33,6 @@ import logging
 import os
 import subprocess
 import sys
-import time
 
 logger    = logging.getLogger(__name__)
 ROOT      = os.path.dirname(os.path.abspath(__file__))
@@ -48,13 +47,14 @@ DATA_DIRS = {
 
 def output_dir(base, cfg):
     m = cfg["method"]
+    metric = cfg.get("distance_metric", "cosine")
     if m == "santext":
         sub = f"eps_{cfg['epsilon']:.2f}"
     elif m == "normal":
         sub = f"eps_{cfg['epsilon']:.2f}_seps_{cfg['s_epsilon']:.2f}"
     else:
         sub = f"eps_{cfg['epsilon']:.2f}_seps_{cfg['s_epsilon']:.2f}_p_{cfg['p']:.2f}"
-    return os.path.join(base, cfg["task"], m, sub)
+    return os.path.join(base, cfg["task"], metric, m, sub)
 
 
 def build_configs(args):
@@ -64,17 +64,11 @@ def build_configs(args):
             for eps in args.epsilons:
                 p_list = args.p_values if method == "plus" else [0.0]
                 for p in p_list:
-                    # if s_epsilon is not given, it will be eps/2 by default
-                    s_eps_str = args.s_epsilon.replace(" ", "")
-                    if s_eps_str.startswith("*"):
-                        s_eps_val = eps * float(s_eps_str[1:])
-                    elif s_eps_str.startswith("/"):
-                        s_eps_val = eps / float(s_eps_str[1:])
-                    else:
-                        s_eps_val = float(s_eps_str)
-                    configs.append(dict(task=task, method=method,
-                                        epsilon=eps, s_epsilon=s_eps_val, p=p))
-
+                    configs.append(dict(
+                        task=task, method=method,
+                        epsilon=eps, s_epsilon=eps / 2, p=p,
+                        distance_metric=args.distance_metric,
+                    ))
     return configs
 
 
@@ -93,9 +87,13 @@ def main():
     p.add_argument("--methods",  nargs="+", default=["santext", "normal", "plus"],
                    choices=["santext", "normal", "plus"])
     p.add_argument("--epsilons", nargs="+", type=float, default=[1, 2, 4, 8])
-    p.add_argument("--s_epsilon", type=str, default='*0.5', help="E.g. '*0.5', '/2', or '1.5'")
-    p.add_argument("--distance_metric", default="cosine", choices=["cosine", "euclidean"])
-    p.add_argument("--p_values", nargs="+", type=float, default=[0.7])
+    p.add_argument("--distance_metric", default="cosine",
+                   choices=["cosine", "cosine_clipped", "euclidean", "euclidean_clipped"])
+    p.add_argument("--clip_lo", type=float, default=0.0,
+                   help="Clip lower bound (default 0.0)")
+    p.add_argument("--clip_hi", type=float, default=0.81,
+                   help="Clip upper bound: 0.81=cosine kNN-p95, 11.85=euclidean kNN-p95")
+    p.add_argument("--p_values", nargs="+", type=float, default=[0.6])
     p.add_argument("--no_ner", action="store_true",
                    help="Disable NER; fall back to frequency-based detection")
     p.add_argument("--sensitive_source", default="dataset",
@@ -116,11 +114,6 @@ def main():
     p.add_argument("--seed",    type=int, default=42)
     p.add_argument("--threads", type=int, default=4)
     args = p.parse_args()
-
-    # Save original base for sensitive words
-    original_output_base = args.output_base
-    current_time = time.strftime("%Y%m%d_%H%M%S")
-    args.output_base = os.path.join(args.output_base, f"{current_time}_run")
 
     logging.basicConfig(format="%(asctime)s %(message)s",
                         datefmt="%H:%M:%S", level=logging.INFO)
@@ -155,11 +148,12 @@ def main():
                        "--data_dir",    data_dir,
                        "--embed_path",  args.embed_path,
                        "--distance_metric", args.distance_metric,
+                       "--clip_lo",         str(args.clip_lo),
+                       "--clip_hi",         str(args.clip_hi),
                        "--sensitive_source", args.sensitive_source,
                        "--output_dir",  san_dir,
                        "--seed",        str(args.seed),
                        "--threads",     str(args.threads),
-                       "--sensitive_words_dir", os.path.join(original_output_base, "sensitive_words"),
                        ]
                 if args.no_ner:
                     cmd += ["--no_ner", "--sensitive_pct", str(args.sensitive_pct)]
@@ -176,8 +170,7 @@ def main():
             else:
                 cmd = [sys.executable, TRAIN,
                        "--task",       cfg["task"],
-                       "--train_dir",   san_dir,
-                       "--test_dir", data_dir,
+                       "--data_dir",   san_dir,
                        "--output_dir", san_dir,
                        "--num_epochs", str(args.num_epochs),
                        "--batch_size", str(args.batch_size),
@@ -228,10 +221,10 @@ def main():
                     r["task"], r["method"], r["epsilon"], r["s_epsilon"], r["p"], acc)
 
     os.makedirs(args.output_base, exist_ok=True)
-    csv_path = os.path.join(args.output_base, "summary.csv")
+    csv_path = os.path.join(args.output_base, f"summary_{args.distance_metric}.csv")
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(
-            f, fieldnames=["task","method","epsilon","s_epsilon","p","accuracy"])
+            f, fieldnames=["task","method","epsilon","s_epsilon","p","distance_metric","accuracy"])
         writer.writeheader()
         writer.writerows(all_results)
     logger.info("Summary → %s", csv_path)

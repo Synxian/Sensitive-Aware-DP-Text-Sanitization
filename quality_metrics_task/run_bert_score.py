@@ -30,16 +30,11 @@ def compute_bert_score(
             for i in range(0, len(words), max_words)
         ]
 
-    all_precisions = []
-    all_recalls = []
-    all_f1s = []
+    all_o_chunks = []
+    all_s_chunks = []
     all_weights = []
 
-    for orig_doc, san_doc in tqdm(
-        zip(original, sanitized),
-        total=len(original),
-        desc="BERTScore",
-    ):
+    for orig_doc, san_doc in zip(original, sanitized):
         orig_chunks = chunk_text(orig_doc, max_words=300)
         san_chunks = chunk_text(san_doc, max_words=300)
 
@@ -47,30 +42,25 @@ def compute_bert_score(
         orig_chunks = orig_chunks[:n]
         san_chunks = san_chunks[:n]
 
-        for i in range(0, n, batch_size):
-            o_batch = orig_chunks[i:i + batch_size]
-            s_batch = san_chunks[i:i + batch_size]
+        all_o_chunks.extend(orig_chunks)
+        all_s_chunks.extend(san_chunks)
+        all_weights.extend([len(t.split()) for t in orig_chunks])
 
-            with torch.no_grad():
-                P, R, F1 = score(
-                    s_batch,
-                    o_batch,
-                    model_type=model_name,
-                    device=device,
-                    verbose=False
-                )
-
-            weights = [len(t.split()) for t in o_batch]
-
-            all_precisions.extend(P.tolist())
-            all_recalls.extend(R.tolist())
-            all_f1s.extend(F1.tolist())
-            all_weights.extend(weights)
+    with torch.no_grad():
+        P, R, F1 = score(
+            all_s_chunks,
+            all_o_chunks,
+            model_type=model_name,
+            device=device,
+            batch_size=64,
+            verbose=True
+        )
 
     w = torch.tensor(all_weights, dtype=torch.float)
-    precision = torch.sum(torch.tensor(all_precisions) * w) / torch.sum(w)
-    recall = torch.sum(torch.tensor(all_recalls) * w) / torch.sum(w)
-    f1 = torch.sum(torch.tensor(all_f1s) * w) / torch.sum(w)
+    # score() returns 1D tensors, w is also a 1D tensor
+    precision = torch.sum(P * w) / torch.sum(w)
+    recall = torch.sum(R * w) / torch.sum(w)
+    f1 = torch.sum(F1 * w) / torch.sum(w)
 
     return {
         "precision": precision.item(),

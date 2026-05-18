@@ -36,9 +36,11 @@ from pydantic_models.sanitizerdp import (
 class SanitizerConfig:
     epsilon: float
     s_epsilon: float
-    p: float = 0.7
+    p: float = 0.6
     method: SanitizerDPMethod = SanitizerDPMethod.NORMAL
     distance_metric: str = "cosine"
+    clip_lo: float = 0.2
+    clip_hi: float = 0.8
     replacements_output_dir: str = "replacements"
 
 
@@ -63,7 +65,10 @@ class Sanitizer:
 
     # Distance matrices (computed once, never change)
     s_distance_matrix: np.ndarray | None = None
-    n_distance_matrix: np.ndarray | None = None
+
+    # Precomputed logits: -distance / (2 * sensitivity).
+    # To get probabilities at any epsilon: softmax(eps * n_logits_base[row]).
+    n_logits_base: np.ndarray | None = None
 
     # Sensitivity of the utility function u(x,y) = -distance(x,y).
     sensitivity: float = 1.0
@@ -71,7 +76,7 @@ class Sanitizer:
     # Sensitive prob matrix (fixed epsilon_s, precomputed once)
     s_prob_matrix: np.ndarray | None = None
 
-    # Normal prob matrix at the fixed config epsilon.
+    # Normal prob matrix at the fixed config epsilon (santext + no-redistribution fallback).
     n_prob_matrix_fixed: np.ndarray | None = None
 
     @property
@@ -83,6 +88,48 @@ class Sanitizer:
         if not (0.0 < p < 1.0):
             raise ValueError(f"p must be in (0, 1) for method=plus, got p={p}")
         return math.log(max(p / (1 - p), (1 - p) / p))
+
+    def _make_dist_fn(self) -> tuple[float, "callable"]:
+        """Return (sensitivity, distance_function) for the configured metric.
+
+        Supported metrics:
+        - "cosine":            cosine_distances, Δ = 1.0  (range [0,2], practical ~[0,1.4])
+        - "cosine_clipped":    clip(cosine_distances, clip_lo, clip_hi),
+                               Δ = clip_hi - clip_lo  (LDP-valid, public constants)
+                               Recommended: clip_lo=0.0, clip_hi=0.81 (k=50 kNN p95 GloVe-full)
+        - "euclidean":         euclidean_distances, Δ = 1.0  (WARNING: not truly bounded)
+        - "euclidean_clipped": clip(euclidean_distances, clip_lo, clip_hi),
+                               Δ = clip_hi - clip_lo  (LDP-valid, public constants)
+                               Recommended: clip_lo=0.0, clip_hi=11.85 (k=50 kNN p95 GloVe-full)
+        """
+        metric = self.config.distance_metric
+        _BASE = {
+            "cosine":            (cosine_distances,    1.0),
+            "cosine_clipped":    (cosine_distances,    None),
+            "euclidean":         (euclidean_distances, 1.0),
+            "euclidean_clipped": (euclidean_distances, None),
+        }
+        if metric not in _BASE:
+            raise ValueError(
+                f"Unknown distance_metric '{metric}'. "
+                f"Choose from: {list(_BASE)}"
+            )
+        base_fn, fixed_sensitivity = _BASE[metric]
+        if fixed_sensitivity is not None:
+            return fixed_sensitivity, base_fn
+
+        # Clipped variant — derive sensitivity from config bounds
+        lo, hi = self.config.clip_lo, self.config.clip_hi
+        if not (0.0 <= lo < hi):
+            raise ValueError(
+                f"{metric} requires 0 <= clip_lo < clip_hi, "
+                f"got clip_lo={lo}, clip_hi={hi}"
+            )
+
+        def clipped_fn(a, b, _fn=base_fn, _lo=lo, _hi=hi):
+            return np.clip(_fn(a, b), _lo, _hi)
+
+        return hi - lo, clipped_fn
 
     def precompute(self, vocab: list[str], embeddings: SanitizerDPEmbeddingAndMappings):
         """Compute distance matrices and fixed sensitive prob matrix.
@@ -101,37 +148,24 @@ class Sanitizer:
             if not self.sword2id or not self.nword2id:
                 raise ValueError("method='plus' requires non-empty sensitive and normal vocabularies.")
 
-        if self.config.distance_metric == "cosine":
-            distance_fn = cosine_distances
-        elif self.config.distance_metric == "euclidean":
-            distance_fn = euclidean_distances
-        else:
-            raise ValueError(f"Unknown distance: {self.config.distance!r}. Expected 'cosine' or 'euclidean'.")
-
+        self.sensitivity, dist_fn = self._make_dist_fn()
 
         if self.config.method == SanitizerDPMethod.NORMAL:
-             # s_dist: |V_s| x |V_all|, n_dist: |V_n| x |V_all|
-            self.s_distance_matrix = distance_fn(
-                embeddings.sensitive_word_embed, embeddings.all_word_embed
-            )
-            self.n_distance_matrix = distance_fn(
-                embeddings.normal_word_embed, embeddings.all_word_embed
-            )
+            self.s_distance_matrix = dist_fn(
+                embeddings.sensitive_word_embed, embeddings.all_word_embed)
+            n_dist = dist_fn(
+                embeddings.normal_word_embed, embeddings.all_word_embed)
         elif self.config.method == SanitizerDPMethod.PLUS:
-            # s_dist: |V_all| x |V_s|, n_dist: |V_all| x |V_n|
-            self.s_distance_matrix = distance_fn(
-                embeddings.all_word_embed, embeddings.sensitive_word_embed
-            )
-            self.n_distance_matrix = distance_fn(
-                embeddings.all_word_embed, embeddings.normal_word_embed
-            )
+            self.s_distance_matrix = dist_fn(
+                embeddings.all_word_embed, embeddings.sensitive_word_embed)
+            n_dist = dist_fn(
+                embeddings.all_word_embed, embeddings.normal_word_embed)
         elif self.config.method == SanitizerDPMethod.SANTEXT:
-             # Single square matrix
-            self.n_distance_matrix = distance_fn(
-                embeddings.all_word_embed, embeddings.all_word_embed
-            )
+            n_dist = dist_fn(
+                embeddings.all_word_embed, embeddings.all_word_embed)
 
-        self.sensitivity = 1.0
+        # Store logits once: softmax(eps * logits) gives probs for any eps.
+        self.n_logits_base = -n_dist / (2 * self.sensitivity)
 
         if self.s_distance_matrix is not None:
             L = self.mixing_overhead
@@ -144,15 +178,21 @@ class Sanitizer:
                 self.s_distance_matrix, s_mech_eps)
 
         if self.config.method == SanitizerDPMethod.SANTEXT:
-            self.n_prob_matrix_fixed = self._build_n_prob_matrix(self.config.epsilon)
+            self.n_prob_matrix_fixed = softmax(
+                self.config.epsilon * self.n_logits_base, axis=1)
 
     def _build_prob_matrix(self, distance_matrix: np.ndarray, eps: float) -> np.ndarray:
         """Apply the exponential mechanism: softmax(eps * -distance / (2 * sensitivity))."""
         return softmax(eps * (-distance_matrix) / (2 * self.sensitivity), axis=1)
 
-    def _build_n_prob_matrix(self, epsilon_n: float) -> np.ndarray:
-        assert self.n_distance_matrix is not None, "Call precompute() first"
-        return self._build_prob_matrix(self.n_distance_matrix, epsilon_n)
+    def _sample_n_row(self, row_idx: int, eps_n: float) -> int:
+        """Sample from the normal vocab for a single word at a given epsilon.
+
+        Computes softmax(eps_n * logits_base[row]) on the fly — one row of ~27K
+        floats instead of rebuilding the full (14K × 27K) matrix per document.
+        """
+        probs = softmax(eps_n * self.n_logits_base[row_idx])
+        return np.random.choice(len(probs), p=probs)
 
     # ------------------------------------------------------------------
     # Word counting
@@ -214,12 +254,12 @@ class Sanitizer:
         """Ours: sensitive words use epsilon_s, normal words use epsilon_n."""
         assert self.s_prob_matrix is not None, "Call precompute() first"
         eps_n = epsilon_n if epsilon_n is not None else self.config.epsilon
-        if epsilon_n is None:
-            if self.n_prob_matrix_fixed is None:
-                self.n_prob_matrix_fixed = self._build_n_prob_matrix(eps_n)
-            n_prob_matrix = self.n_prob_matrix_fixed
-        else:
-            n_prob_matrix = self._build_n_prob_matrix(eps_n)
+
+        # Fixed epsilon → use precomputed full matrix. Per-doc → per-row softmax.
+        use_fixed = (epsilon_n is None)
+        if use_fixed and self.n_prob_matrix_fixed is None:
+            self.n_prob_matrix_fixed = softmax(
+                eps_n * self.n_logits_base, axis=1)
 
         new_doc = []
         total_epsilon = 0.0
@@ -238,8 +278,11 @@ class Sanitizer:
                     total_epsilon += self.config.s_epsilon
                 else:
                     normal_word_count += 1
-                    sampling_prob = n_prob_matrix[self.nword2id[word]]
-                    idx = np.random.choice(len(sampling_prob), p=sampling_prob)
+                    if use_fixed:
+                        sampling_prob = self.n_prob_matrix_fixed[self.nword2id[word]]
+                        idx = np.random.choice(len(sampling_prob), p=sampling_prob)
+                    else:
+                        idx = self._sample_n_row(self.nword2id[word], eps_n)
                     new_doc.append(self.id2word[idx])
                     total_epsilon += eps_n
             else:
@@ -269,12 +312,11 @@ class Sanitizer:
             f"epsilon_n ({eps_n}) must exceed mixing overhead "
             f"L={L:.4f} for method=plus with p={self.config.p}"
         )
-        if epsilon_n is None:
-            if self.n_prob_matrix_fixed is None:
-                self.n_prob_matrix_fixed = self._build_n_prob_matrix(eps_n_mech)
-            n_prob_matrix = self.n_prob_matrix_fixed
-        else:
-            n_prob_matrix = self._build_n_prob_matrix(eps_n_mech)
+
+        use_fixed = (epsilon_n is None)
+        if use_fixed and self.n_prob_matrix_fixed is None:
+            self.n_prob_matrix_fixed = softmax(
+                eps_n_mech * self.n_logits_base, axis=1)
         p = self.config.p
 
         new_doc = []
@@ -296,15 +338,21 @@ class Sanitizer:
                         new_doc.append(self.id2sword[idx])
                         total_epsilon += self.config.s_epsilon
                     else:
-                        sampling_prob = n_prob_matrix[index]
-                        idx = np.random.choice(len(sampling_prob), p=sampling_prob)
+                        if use_fixed:
+                            sampling_prob = self.n_prob_matrix_fixed[index]
+                            idx = np.random.choice(len(sampling_prob), p=sampling_prob)
+                        else:
+                            idx = self._sample_n_row(index, eps_n_mech)
                         new_doc.append(self.id2nword[idx])
                         total_epsilon += eps_n
                 else:
                     normal_word_count += 1
                     if flip <= p:
-                        sampling_prob = n_prob_matrix[index]
-                        idx = np.random.choice(len(sampling_prob), p=sampling_prob)
+                        if use_fixed:
+                            sampling_prob = self.n_prob_matrix_fixed[index]
+                            idx = np.random.choice(len(sampling_prob), p=sampling_prob)
+                        else:
+                            idx = self._sample_n_row(index, eps_n_mech)
                         new_doc.append(self.id2nword[idx])
                         total_epsilon += eps_n
                     else:

@@ -162,11 +162,27 @@ def _build_sensitive_words_ner(
             "Or use --no_ner to fall back to frequency-based detection."
         )
 
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
-    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    # Models are pre-downloaded by setup_and_run.sh; allow online fallback.
+
+    # Resolve model: if it's a HuggingFace model ID (contains '/'), try the local
+    # Flair cache first so it works behind proxies that block huggingface.co.
+    _model_arg = model_name
+    if "/" in model_name and not os.path.exists(model_name):
+        _org, _name = model_name.split("/", 1)
+        _snapshot_root = os.path.join(
+            os.path.expanduser("~/.flair/models"), _name,
+            f"models--{_org}--{_name}", "snapshots",
+        )
+        if os.path.isdir(_snapshot_root):
+            _snapshots = sorted(os.listdir(_snapshot_root))
+            if _snapshots:
+                _candidate = os.path.join(_snapshot_root, _snapshots[-1], "pytorch_model.bin")
+                if os.path.exists(_candidate):
+                    _model_arg = _candidate
+                    logger.info("Using local Flair cache: %s", _candidate)
 
     logger.info("Loading Flair NER model '%s' …", model_name)
-    tagger = SequenceTagger.load(model_name)
+    tagger = SequenceTagger.load(_model_arg)
 
     sensitive: set[str] = set()
     sentences = [FlairSentence(t) for t in tqdm(texts, desc="NER prep", leave=False)]

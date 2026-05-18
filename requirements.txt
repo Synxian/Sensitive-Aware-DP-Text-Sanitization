@@ -19,9 +19,9 @@ tqdm>=4.60
 # After install: python -m spacy download en_core_web_sm  (not needed for rule-based English)
 
 # Optional: quality metrics
-# bert-score
-# mauve-text
-# sentence-transformers
+bert-score
+mauve-text
+sentence-transformers
 
 # NER-based sensitivity detection (NERaseText)
 flair>=0.13

@@ -1,8 +1,3 @@
-# Must be set BEFORE importing transformers (via flair)
-import os as _os
-_os.environ["HF_HUB_OFFLINE"] = "1"
-_os.environ["TRANSFORMERS_OFFLINE"] = "1"
-
 """Sanitize a GLUE-style dataset with Sensitivity-Aware DP.
 
 Methods
@@ -45,14 +40,19 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--task",     required=True, choices=["sst2", "qnli"])
     p.add_argument("--method",   required=True, choices=["santext", "normal", "plus"])
-    p.add_argument("--distance_metric", default="cosine", choices=["cosine", "euclidean"],
+    p.add_argument("--distance_metric", default="cosine",
+                   choices=["cosine", "cosine_clipped", "euclidean", "euclidean_clipped"],
                    help="Distance metric for exponential mechanism (default: cosine)")
+    p.add_argument("--clip_lo", type=float, default=0.2,
+                   help="Lower clip bound for cosine_clipped (default: 0.2)")
+    p.add_argument("--clip_hi", type=float, default=0.8,
+                   help="Upper clip bound for cosine_clipped (default: 0.8)")
     p.add_argument("--epsilon",  type=float, default=10.0,
                    help="Privacy budget epsilon_n for normal words")
     p.add_argument("--s_epsilon", type=float, default=None,
                    help="Privacy budget epsilon_s for sensitive words (default: epsilon/2)")
-    p.add_argument("--p",        type=float, default=0.7,
-                   help="Cross-vocab sampling probability for 'plus' (paper default 0.7)")
+    p.add_argument("--p",        type=float, default=0.6,
+                   help="Cross-vocab sampling probability for 'plus' (default 0.6, works at ε≥1)")
     p.add_argument("--data_dir", required=True)
     p.add_argument("--embed_path", required=True)
     p.add_argument("--output_dir", required=True)
@@ -70,8 +70,6 @@ def parse_args():
                    help="Fallback: fraction of vocab treated as sensitive (--no_ner only)")
     p.add_argument("--sensitive_words_path", default=None,
                    help="Fallback: JSON file {word: ...} with sensitive words (--no_ner only)")
-    p.add_argument("--sensitive_words_dir", default="./output/sensitive_words",
-                   help="Directory to save/load sensitive words cache")
     p.add_argument("--max_samples", type=int, default=None)
     p.add_argument("--seed",    type=int, default=42)
     p.add_argument("--threads", type=int, default=4)
@@ -111,7 +109,7 @@ def main():
         glove_path=args.embed_path,
         task=args.task,
         seed=args.seed,
-        output_dir=args.sensitive_words_dir,
+        output_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "output", "sensitive_words"),
     )
     logger.info("Sensitive words: %d", len(sensitive))
 
@@ -128,6 +126,8 @@ def main():
         p=args.p,
         method=args.method,
         distance_metric=args.distance_metric,
+        clip_lo=args.clip_lo,
+        clip_hi=args.clip_hi,
         replacements_output_dir=os.path.join(args.output_dir, "replacements"),
     )
     sanitizer = Sanitizer(config=config)
@@ -192,6 +192,7 @@ def main():
         "epsilon": args.epsilon, "s_epsilon": args.s_epsilon,
         "p": args.p, "use_ner": not args.no_ner,
         "distance_metric": args.distance_metric,
+        "clip_lo": args.clip_lo, "clip_hi": args.clip_hi,
         "sensitive_source": args.sensitive_source,
         "splits": stats,
     }
